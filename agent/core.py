@@ -1,6 +1,7 @@
 """AI 交易 Agent 核心。
 
-整合数据获取、技术分析、基本面评估、策略信号生成和回测验证。
+整合数据获取、技术分析、基本面评估、策略信号生成、回测验证、
+LLM智能分析和风险管理。
 提供统一的对外接口。
 """
 
@@ -8,9 +9,11 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from agent.config import AgentConfig
+from agent.llm import LLMAnalyzer
 from data.market import MarketData
 from data.fundamental import FundamentalData
 from data.news import NewsData
@@ -21,6 +24,7 @@ from strategy.base import TradeSignal, Signal
 from strategy.factory import StrategyFactory
 from backtest.engine import BacktestEngine, BacktestResult
 from backtest.metrics import MetricsReport
+from risk import RiskManager, RiskLimits, PositionSize, PortfolioRisk
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,15 @@ class TradingAgent:
         )
         self.strategy = StrategyFactory.get(self.config.strategy)
         self.backtest_engine = BacktestEngine()
+        self.llm_analyzer = LLMAnalyzer(
+            model=self.config.llm_model if self.config.llm_enabled else None
+        )
+        self.risk_manager = RiskManager(RiskLimits(
+            max_single_position=self.config.max_position_pct,
+            max_total_positions=self.config.max_positions,
+            stop_loss_pct=self.config.stop_loss_pct,
+            take_profit_pct=self.config.take_profit_pct,
+        ))
 
         # 缓存
         self._stock_list: Optional[pd.DataFrame] = None
@@ -270,81 +283,105 @@ class TradingAgent:
         result = engine.run(signals_df, price_data)
         return result
 
-    # ── 报告生成 ──────────────────────────────────────────
+# ── 报告生成 ──────────────────────────────────────────
 
-    def generate_report(self) -> str:
-        """生成完整的投资分析报告。"""
+    def generate_report(self, use_llm: bool = False) -> str:
+        """生成完整的投资分析报告。
+
+        Args:
+            use_llm: 是否使用LLM生成AI解读（需要 llm_enabled=True）
+        """
         if not self._scores:
             self._scores = self.scan_market(verbose=False)
         if not self._signals:
             self.generate_signals()
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        strategy_name = self.config.strategy
-        strategy_desc = self.strategy.description
+        return self.llm_analyzer.generate_full_report(
+            scores=self._scores,
+            market_df=self._get_market_kline(),
+            strategy_name=self.config.strategy,
+        )
 
-        lines = [
-            "╔══════════════════════════════════════════════════════╗",
-            "║           A 股 投 资 分 析 报 告                     ║",
-            f"║  生成时间: {now}                    ║",
-            f"║  策略: {strategy_desc}                               ║",
-            "╠══════════════════════════════════════════════════════╣",
-            "",
-            "━━━ 📊 市场概况 ━━━",
-        ]
+    def generate_ai_report(self) -> str:
+        """生成AI增强版报告（使用LLM深度解读）。
 
-        # 市场指数
-        try:
-            market_df = self._get_market_kline()
-            if market_df is not None and not market_df.empty:
-                latest = market_df["close"].iloc[-1]
-                pct = float(market_df["pct_change"].iloc[-1]) if "pct_change" in market_df.columns else 0
-                lines.append(f"  沪深300: {latest:.2f}  ({pct:+.2f}%)")
-        except Exception:
-            pass
+        先用量化规则生成基础报告，再用LLM做深度解读。
+        """
+        if not self._scores:
+            self._scores = self.scan_market(verbose=False)
 
-        lines.append("")
-        lines.append("━━━ 🎯 买入信号 ━━━")
+        # 基础量化报告
+        base = self.llm_analyzer.generate_full_report(
+            scores=self._scores,
+            market_df=self._get_market_kline(),
+            strategy_name=self.config.strategy,
+        )
 
-        buy_signals = self.get_buy_signals()
-        if buy_signals:
-            for i, sig in enumerate(buy_signals[:10], 1):
-                icon = "🔥" if sig.signal == Signal.STRONG_BUY else "📈"
-                lines.append(
-                    f"  {i:>2}. {icon} {sig.symbol} {sig.name:<8s} "
-                    f"评分:{sig.score:.2f}  {sig.reason}"
-                )
-        else:
-            lines.append("  (暂无符合条件的买入信号)")
+        # 如果LLM未启用，直接返回基础报告
+        if not self.config.llm_enabled:
+            return base + "\n\n[提示] 启用 LLM 分析：在 AgentConfig 中设置 llm_enabled=True"
 
-        lines.append("")
-        lines.append("━━━ 📋 综合评分 Top 10 ━━━")
+        # TODO: 实际调用 LLM 进行增强分析
+        prompt = self.llm_analyzer.build_market_prompt(self._scores, self._get_market_kline())
 
-        for i, score in enumerate(self._scores[:10], 1):
-            signal_icon = {
-                "STRONG_BUY": "🔥",
-                "BUY": "📈",
-                "HOLD": "⏸️",
-                "SELL": "📉",
-                "STRONG_SELL": "💀",
-            }.get(score.signal, "❓")
+        return base + f"\n\n[AI 分析提示词已生成，共 {len(prompt)} 字符]\n请在 LLM 模式下运行以获取 AI 解读。"
 
-            pe_str = f"PE:{score.pe:.1f}" if score.pe and score.pe > 0 else "PE:N/A"
-            lines.append(
-                f"  {i:>2}. {signal_icon} {score.symbol} {score.name:<8s} "
-                f"总分:{score.total_score:.2f} 评级:{score.rating}  "
-                f"技术:{score.tech_score:+d} 基本:{score.fund_score:+d}  "
-                f"{pe_str}"
-            )
+    # ── 仓位管理 ──────────────────────────────────────────
 
-        lines.append("")
-        lines.append("━━━ ⚠️ 风险提示 ━━━")
-        lines.append("  本报告由算法自动生成，仅供参考，不构成投资建议。")
-        lines.append("  股市有风险，投资需谨慎。历史表现不代表未来收益。")
-        lines.append("")
-        lines.append("╚══════════════════════════════════════════════════════╝")
+    def get_position_suggestions(
+        self,
+        total_capital: float,
+        current_positions: Dict[str, float] = None,
+    ) -> List[PositionSize]:
+        """获取仓位建议。"""
+        if not self._scores:
+            self._scores = self.scan_market(verbose=False)
 
-        return "\n".join(lines)
+        return self.risk_manager.calculate_position_sizes(
+            scores=self._scores,
+            total_capital=total_capital,
+            current_positions=current_positions,
+        )
+
+    def check_risk_alerts(
+        self,
+        positions: Dict[str, dict],
+        price_data: Dict[str, pd.DataFrame],
+    ) -> List[Dict]:
+        """检查持仓的风险告警（止损/止盈）。"""
+        return self.risk_manager.check_stop_conditions(positions, price_data)
+
+    def generate_risk_report(
+        self,
+        total_capital: float,
+        current_positions: Dict[str, float] = None,
+    ) -> str:
+        """生成风控分析报告。"""
+        positions = self.get_position_suggestions(total_capital, current_positions)
+
+        # 从历史扫描结果估算风险指标
+        returns = []
+        for s in self._scores[:5]:
+            try:
+                df = self.market_data.get_daily_kline(s.symbol)
+                if len(df) > 30:
+                    rets = df["close"].pct_change().dropna()
+                    returns.append(rets)
+            except Exception:
+                pass
+
+        risk = PortfolioRisk()
+        if returns:
+            # 用第一只股票的收益作为组合收益近似
+            risk.volatility = float(np.std(returns[0]) * np.sqrt(252)) if returns else 0
+            risk.max_drawdown = 0
+            risk.sharpe = 0
+
+        return self.risk_manager.generate_risk_report(
+            positions=positions,
+            risk_metrics=risk,
+            total_capital=total_capital,
+        )
 
     # ── 内部方法 ──────────────────────────────────────────
 

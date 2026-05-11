@@ -5,7 +5,10 @@ Usage:
     python cli.py scan                    # 全市场扫描
     python cli.py analyze 000001          # 分析单只股票
     python cli.py report                  # 生成投资报告
+    python cli.py ai-report               # AI增强报告
     python cli.py signals                 # 生成交易信号
+    python cli.py position 100000         # 仓位建议
+    python cli.py risk 100000             # 风控分析
     python cli.py backtest                # 运行回测
     python cli.py strategy list           # 列出策略
     python cli.py strategy set momentum   # 切换策略
@@ -107,6 +110,86 @@ def report(
     with console.status("[bold green]正在生成报告...[/bold green]"):
         a.scan_market(top_n=top_n, verbose=False)
         rep = a.generate_report()
+
+    console.print(rep)
+
+
+# ── AI 报告 ──────────────────────────────────────────────
+
+@app.command()
+def ai_report(
+    top_n: int = typer.Option(20, "--top", "-n", help="分析前N只"),
+    strategy: str = typer.Option("trend", "--strategy", "-s", help="策略名称"),
+):
+    """生成AI增强版投资分析报告。"""
+    a = get_agent(strategy)
+
+    with console.status("[bold green]正在扫描并生成AI分析报告...[/bold green]"):
+        a.scan_market(top_n=top_n, verbose=False)
+        rep = a.generate_ai_report()
+
+    console.print(rep)
+
+
+# ── 仓位建议 ──────────────────────────────────────────────
+
+@app.command()
+def position(
+    capital: float = typer.Argument(..., help="总资金（元），如 100000"),
+    strategy: str = typer.Option("trend", "--strategy", "-s", help="策略名称"),
+):
+    """基于评分生成仓位配置建议。"""
+    a = get_agent(strategy)
+
+    with console.status("[bold green]正在分析并计算仓位...[/bold green]"):
+        a.scan_market(top_n=30, verbose=False)
+        suggestions = a.get_position_suggestions(total_capital=capital)
+
+    if not suggestions:
+        console.print("[yellow]暂无符合条件的仓位建议[/yellow]")
+        return
+
+    table = Table(title=f"仓位配置建议（总资金: ¥{capital:,.0f}）")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("代码", style="cyan")
+    table.add_column("名称")
+    table.add_column("评分", justify="right")
+    table.add_column("建议仓位", justify="right")
+    table.add_column("建议金额", justify="right")
+    table.add_column("止损价", justify="right")
+    table.add_column("止盈价", justify="right")
+    table.add_column("理由")
+
+    for i, p in enumerate(suggestions, 1):
+        amount = capital * p.suggested_pct
+        table.add_row(
+            str(i),
+            p.symbol,
+            p.name[:8] if p.name else "-",
+            f"{p.score:.2f}",
+            f"{p.suggested_pct*100:.1f}%",
+            f"¥{amount:,.0f}",
+            f"¥{p.stop_loss_price:.2f}" if p.stop_loss_price else "-",
+            f"¥{p.take_profit_price:.2f}" if p.take_profit_price else "-",
+            p.reason,
+        )
+
+    console.print(table)
+
+
+# ── 风控分析 ──────────────────────────────────────────────
+
+@app.command()
+def risk(
+    capital: float = typer.Argument(100000, help="总资金（元），如 100000"),
+    strategy: str = typer.Option("trend", "--strategy", "-s", help="策略名称"),
+):
+    """生成风控分析报告。"""
+    a = get_agent(strategy)
+
+    with console.status("[bold green]正在分析风险...[/bold green]"):
+        a.scan_market(top_n=30, verbose=False)
+        rep = a.generate_risk_report(total_capital=capital)
 
     console.print(rep)
 

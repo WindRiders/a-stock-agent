@@ -7,6 +7,8 @@ from .base import BaseStrategy
 from .momentum import MomentumStrategy
 from .value import ValueStrategy
 from .trend import TrendFollowingStrategy
+from .grid import GridTradingStrategy
+from .mean_reversion import MeanReversionStrategy
 
 
 class StrategyFactory:
@@ -16,6 +18,8 @@ class StrategyFactory:
         "momentum": MomentumStrategy,
         "value": ValueStrategy,
         "trend": TrendFollowingStrategy,
+        "grid": GridTradingStrategy,
+        "mean_reversion": MeanReversionStrategy,
     }
 
     @classmethod
