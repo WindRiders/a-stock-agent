@@ -14,6 +14,7 @@ import pandas as pd
 
 from agent.config import AgentConfig
 from agent.llm import LLMAnalyzer
+from agent.market_state import MarketStateDetector, MarketState
 from data.market import MarketData
 from data.fundamental import FundamentalData
 from data.news import NewsData
@@ -52,8 +53,10 @@ class TradingAgent:
         self.strategy = StrategyFactory.get(self.config.strategy)
         self.backtest_engine = BacktestEngine()
         self.llm_analyzer = LLMAnalyzer(
-            model=self.config.llm_model if self.config.llm_enabled else None
+            model=self.config.llm_model if self.config.llm_enabled else None,
+            llm_config=self.config.get_llm_config(),
         )
+        self.market_detector = MarketStateDetector()
         self.risk_manager = RiskManager(RiskLimits(
             max_single_position=self.config.max_position_pct,
             max_total_positions=self.config.max_positions,
@@ -382,6 +385,56 @@ class TradingAgent:
             risk_metrics=risk,
             total_capital=total_capital,
         )
+
+    # ── 市场状态检测 ──────────────────────────────────────
+
+    def detect_market_state(
+        self, index_code: str = "000300"
+    ) -> MarketState:
+        """检测当前市场状态并推荐策略。
+
+        Args:
+            index_code: 指数代码，默认沪深300
+
+        Returns:
+            MarketState 包含状态判断和策略推荐
+        """
+        try:
+            index_df = self.market_data.get_index_kline(index_code)
+        except Exception as e:
+            logger.error("获取指数数据失败: %s", e)
+            return MarketState(warnings=[f"无法获取指数 {index_code} 的数据"])
+
+        # 可选：获取市场宽度数据
+        breadth = None
+        try:
+            quotes = self.market_data.get_realtime_quotes()
+            if not quotes.empty and "pct_change" in quotes.columns:
+                breadth = quotes
+        except Exception:
+            pass
+
+        state = self.market_detector.detect(index_df, breadth)
+
+        # 自动切换策略
+        is_auto = getattr(self.config, 'auto_strategy', False)
+        if is_auto and state.strategy_confidence > 0.6:
+            old_strategy = self.config.strategy
+            new_strategy = state.recommended_strategy
+            if old_strategy != new_strategy:
+                logger.info(
+                    "市场状态触发策略切换: %s → %s (置信度: %.0f%%)",
+                    old_strategy, new_strategy, state.strategy_confidence * 100,
+                )
+                self.config.strategy = new_strategy
+                self.strategy = StrategyFactory.get(new_strategy)
+
+        return state
+
+    def generate_market_state_report(self) -> str:
+        """生成市场状态诊断报告。"""
+        state = self.detect_market_state()
+        return self.market_detector.generate_report(state)
 
     # ── 内部方法 ──────────────────────────────────────────
 

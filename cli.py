@@ -9,6 +9,8 @@ Usage:
     python cli.py signals                 # 生成交易信号
     python cli.py position 100000         # 仓位建议
     python cli.py risk 100000             # 风控分析
+    python cli.py market                  # 市场状态检测（自动推荐策略）
+    python cli.py market --auto           # 检测并自动切换策略
     python cli.py backtest                # 运行回测
     python cli.py strategy list           # 列出策略
     python cli.py strategy set momentum   # 切换策略
@@ -192,6 +194,49 @@ def risk(
         rep = a.generate_risk_report(total_capital=capital)
 
     console.print(rep)
+
+
+# ── 市场状态 ──────────────────────────────────────────────
+
+@app.command()
+def market(
+    index: str = typer.Option("000300", "--index", "-i", help="指数代码（默认沪深300）"),
+    auto: bool = typer.Option(False, "--auto", help="根据市场状态自动切换策略"),
+):
+    """检测市场状态并推荐策略。"""
+    a = get_agent()
+    a.config.auto_strategy = auto
+
+    with console.status("[bold green]正在检测市场状态...[/bold green]"):
+        state = a.detect_market_state(index_code=index)
+
+    # 状态面板
+    regime_colors = {
+        "bull_trend": "bold green", "bear_trend": "bold red",
+        "sideways": "yellow", "high_volatility": "bold yellow",
+        "panic": "bold red", "recovery": "green",
+    }
+    risk_colors = {"high": "bold red", "medium": "yellow", "low": "green"}
+
+    console.print(
+        Panel.fit(
+            f"[{regime_colors.get(state.regime.value, 'white')}]"
+            f"当前市场状态: {state.regime_cn}[/]\n"
+            f"趋势方向: {state.trend_direction} | "
+            f"波动: {state.volatility_regime} | "
+            f"30日最大回撤: {state.max_drawdown_30d*100:.1f}%\n\n"
+            f"[bold]推荐策略: {state.recommended_strategy}[/bold] "
+            f"(置信度 {state.strategy_confidence:.0%})\n"
+            f"理由: {state.strategy_reason}\n\n"
+            f"风险等级: [{risk_colors.get(state.risk_level, 'white')}]{state.risk_level}[/]",
+            title="市场状态诊断",
+            border_style="cyan",
+        )
+    )
+
+    if state.warnings:
+        for w in state.warnings:
+            console.print(f"[yellow]⚠️ {w}[/yellow]")
 
 
 # ── 策略管理 ──────────────────────────────────────────────
