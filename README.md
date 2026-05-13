@@ -11,7 +11,7 @@
 ║           A 股 投 资 分 析 报 告                     ║
 ║  生成时间: 2025-05-12 10:30                          ║
 ║  策略: 趋势跟踪：均线多头+量价配合的趋势策略         ║
-[![Tests](https://img.shields.io/badge/tests-87%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-96%20passed-brightgreen)](tests/)
 [![CI](https://github.com/WindRiders/a-stock-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/WindRiders/a-stock-agent/actions)
 
 命令行 A 股量化分析工具，集成技术分析、基本面评估、策略信号生成、
