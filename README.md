@@ -11,10 +11,11 @@
 ║           A 股 投 资 分 析 报 告                     ║
 ║  生成时间: 2025-05-12 10:30                          ║
 ║  策略: 趋势跟踪：均线多头+量价配合的趋势策略         ║
-[![Tests](https://img.shields.io/badge/tests-73%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-87%20passed-brightgreen)](tests/)
+[![CI](https://github.com/WindRiders/a-stock-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/WindRiders/a-stock-agent/actions)
 
 命令行 A 股量化分析工具，集成技术分析、基本面评估、策略信号生成、
-回测引擎、**风险管理**和 **AI 智能解读**。支持 5 种交易策略和参数优化。
+回测引擎、**风险管理**、**市场状态检测**和 **AI 智能解读**。
 
 ## 功能
 
@@ -22,8 +23,9 @@
 - **个股分析** — 深度技术分析 + 基本面评估 + 消息面情感分析
 - **策略信号** — 5 种内置策略（趋势跟踪 / 动量 / 价值 / 网格 / 均值回归）
 - **回测引擎** — 完整 A 股交易模拟 + 参数优化 + Walk-Forward 分析
+- **市场状态检测** — 7 种市场状态自动识别 + 策略自动推荐
 - **风险管理** — 仓位计算、组合风险度（VaR/CVaR/Beta/夏普）、止损止盈
-- **AI 智能报告** — 自然语言市场解读 + 个股深度点评
+- **LLM 智能分析** — 通用 OpenAI 兼容 API，支持真正的 AI 深度解读
 - **投资报告** — 一键生成量化+AI增强分析报告
 
 ## 技术栈
@@ -80,6 +82,15 @@ a-stock-agent position 100000
 
 # 风控分析
 a-stock-agent risk 100000
+
+# 市场状态检测 + 策略推荐
+a-stock-agent market
+
+# 自动切换为推荐策略
+a-stock-agent market --auto
+
+# 单股历史回测
+a-stock-agent backtest --symbol 000001 --capital 100000
 
 # 查看可用策略
 a-stock-agent strategy list

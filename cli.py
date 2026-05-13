@@ -20,6 +20,7 @@ import logging
 import sys
 from typing import Optional
 
+import pandas as pd
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -237,6 +238,108 @@ def market(
     if state.warnings:
         for w in state.warnings:
             console.print(f"[yellow]⚠️ {w}[/yellow]")
+
+
+# ── 回测 ──────────────────────────────────────────────────
+
+@app.command()
+def backtest(
+    symbol: str = typer.Option("000001", "--symbol", "-s", help="回测单只股票"),
+    capital: float = typer.Option(100000, "--capital", "-c", help="初始资金"),
+    strategy: str = typer.Option("trend", "--strategy", help="策略名称"),
+    days: int = typer.Option(252, "--days", "-d", help="回测天数"),
+):
+    """单股历史回测，验证策略在历史数据上的表现。"""
+    a = get_agent(strategy)
+
+    with console.status(f"[bold green]正在回测 {symbol}（{days}个交易日）...[/bold green]"):
+        try:
+            # 获取历史K线
+            from datetime import datetime, timedelta
+            end = datetime.now().strftime("%Y%m%d")
+            start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
+            df = a.market_data.get_daily_kline(symbol, start_date=start, end_date=end)
+
+            if df.empty or len(df) < 60:
+                console.print(f"[red]数据不足（需要至少60个交易日）[/red]")
+                return
+
+            # 对历史每一天做技术分析，生成信号
+            from analysis.technical import TechnicalAnalyzer
+            ta_analyzer = TechnicalAnalyzer()
+
+            signals = []
+            for i in range(60, len(df)):
+                window = df.iloc[: i + 1]
+                tech = ta_analyzer.analyze(window, symbol)
+
+                # 生成简化信号
+                if tech.total_score >= 4:
+                    sig = "BUY"
+                elif tech.total_score <= -4:
+                    sig = "SELL"
+                else:
+                    sig = "HOLD"
+
+                signals.append({
+                    "date": str(window["date"].iloc[-1])[:10],
+                    "symbol": symbol,
+                    "signal": sig,
+                    "score": tech.total_score / 11.0,
+                })
+
+            signals_df = pd.DataFrame(signals)
+
+            # 运行回测
+            from backtest.engine import BacktestEngine
+            engine = BacktestEngine(initial_capital=capital)
+            result = engine.run(signals_df, {symbol: df})
+
+        except Exception as e:
+            console.print(f"[red]回测失败: {e}[/red]")
+            return
+
+    # 结果展示
+    return_pct = result.total_return
+    color = "green" if return_pct > 0 else "red"
+
+    table = Table(title=f"回测结果 — {symbol} × {strategy} 策略")
+    table.add_column("指标", style="cyan")
+    table.add_column("数值", justify="right")
+
+    table.add_row("初始资金", f"¥{result.initial_capital:,.0f}")
+    table.add_row("最终权益", f"¥{result.final_equity:,.2f}")
+    table.add_row("总收益率", f"[{color}]{return_pct:+.2f}%[/{color}]")
+    table.add_row("年化收益率", f"[{color}]{result.annual_return:+.2f}%[/{color}]")
+    table.add_row("最大回撤", f"[red]{result.max_drawdown:.2f}%[/red]")
+    table.add_row("夏普比率", f"{result.sharpe_ratio:.2f}")
+    table.add_row("胜率", f"{result.win_rate:.1f}%")
+    table.add_row("交易次数", f"{result.total_trades}")
+
+    console.print(table)
+
+    # 近期交易记录
+    if result.trades:
+        console.print("\n[bold]最近10笔交易[/bold]")
+        trade_table = Table(show_header=True, box=None)
+        trade_table.add_column("日期")
+        trade_table.add_column("操作")
+        trade_table.add_column("价格", justify="right")
+        trade_table.add_column("数量", justify="right")
+        trade_table.add_column("金额", justify="right")
+
+        for t in result.trades[-10:]:
+            action_color = "green" if t.action == "BUY" else "red"
+            trade_table.add_row(
+                str(t.date)[:10],
+                f"[{action_color}]{t.action}[/{action_color}]",
+                f"¥{t.price:.2f}",
+                f"{t.shares}",
+                f"¥{t.amount:,.0f}",
+            )
+        console.print(trade_table)
+
+    console.print(f"\n[dim]回测说明：基于历史K线滑动窗口技术分析，每次信号使用截至当日数据[/dim]")
 
 
 # ── 策略管理 ──────────────────────────────────────────────
