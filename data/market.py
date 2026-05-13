@@ -50,7 +50,9 @@ class MarketData:
         bs.logout()
         records = []
         while (rs.error_code == "0") & rs.next():
-            records.append(rs.get_row_data())
+            row = rs.get_row_data()
+            # baostock 返回 6 列: code, code_name, ipoDate, outDate, type, status
+            records.append(row[:4])  # 只取前4列
         df = pd.DataFrame(records, columns=["code", "name", "ipoDate", "type"])
         df = df[df["type"] == "1"]  # 只取股票
         return df.rename(columns={"code": "symbol"})

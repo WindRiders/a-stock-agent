@@ -18,6 +18,7 @@ from agent.market_state import MarketStateDetector, MarketState
 from data.market import MarketData
 from data.fundamental import FundamentalData
 from data.news import NewsData
+from data.store import DataStore
 from analysis.technical import TechnicalAnalyzer
 from analysis.fundamental import FundamentalAnalyzer
 from analysis.scoring import StockScorer, StockScore
@@ -63,12 +64,14 @@ class TradingAgent:
             stop_loss_pct=self.config.stop_loss_pct,
             take_profit_pct=self.config.take_profit_pct,
         ))
+        self.store = DataStore()
 
         # 缓存
         self._stock_list: Optional[pd.DataFrame] = None
         self._scores: List[StockScore] = []
         self._signals: List[TradeSignal] = []
         self._market_kline: Optional[pd.DataFrame] = None
+        self._current_scan_id: Optional[int] = None
 
     # ── 市场扫描 ──────────────────────────────────────────
 
@@ -135,6 +138,15 @@ class TradingAgent:
         # 按总分排序
         scores.sort(key=lambda x: x.total_score, reverse=True)
         self._scores = scores[:top_n]
+
+        # 自动持久化
+        try:
+            self._current_scan_id = self.store.save_scan(
+                scores=self._scores,
+                strategy=self.config.strategy,
+            )
+        except Exception as e:
+            logger.warning("持久化扫描结果失败: %s", e)
 
         if verbose:
             logger.info("扫描完成！共分析 %d 只股票，有效评分 %d 只", len(candidates), len(self._scores))
@@ -435,6 +447,61 @@ class TradingAgent:
         """生成市场状态诊断报告。"""
         state = self.detect_market_state()
         return self.market_detector.generate_report(state)
+
+    # ── 历史查询 ──────────────────────────────────────────
+
+    def get_history(self, limit: int = 20) -> List[Dict]:
+        """获取最近的扫描历史。"""
+        return self.store.get_scan_history(limit)
+
+    def get_stock_history(self, symbol: str, limit: int = 30) -> List[Dict]:
+        """获取某只股票的评分历史。"""
+        return self.store.get_stock_history(symbol, limit)
+
+    # ── 持仓管理 ──────────────────────────────────────────
+
+    def get_portfolio(self) -> List[Dict]:
+        """获取持仓列表。"""
+        return self.store.get_positions()
+
+    def get_portfolio_summary(self) -> Dict:
+        """获取持仓汇总。"""
+        return self.store.get_portfolio_summary()
+
+    def record_buy(self, symbol: str, shares: int, price: float, name: str = "", reason: str = ""):
+        """记录买入。"""
+        self.store.add_position(symbol, shares, price, name)
+        self.store.record_trade(symbol, "BUY", shares, price, name, reason=reason)
+
+    def record_sell(self, symbol: str, shares: int, price: float, name: str = "", reason: str = ""):
+        """记录卖出。"""
+        commission = price * shares * 0.00025
+        stamp_tax = price * shares * 0.001
+        self.store.record_trade(
+            symbol, "SELL", shares, price, name,
+            commission=commission, stamp_tax=stamp_tax, reason=reason,
+        )
+        self.store.close_position(symbol, exit_price=price)
+
+    def refresh_prices(self):
+        """刷新持仓市价。"""
+        try:
+            from data.market import MarketData
+            md = MarketData()
+            quotes = md.get_realtime_quotes()
+            if not quotes.empty:
+                price_map = dict(zip(quotes["symbol"], quotes["price"]))
+                self.store.update_positions_prices(price_map)
+        except Exception as e:
+            logger.warning("刷新持仓价格失败: %s", e)
+
+    def get_trades(self, limit: int = 100) -> List[Dict]:
+        """获取交易记录。"""
+        return self.store.get_trades(limit)
+
+    def get_db_stats(self) -> Dict:
+        """获取数据库统计。"""
+        return self.store.get_stats()
 
     # ── 内部方法 ──────────────────────────────────────────
 

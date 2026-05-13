@@ -9,9 +9,15 @@ Usage:
     python cli.py signals                 # 生成交易信号
     python cli.py position 100000         # 仓位建议
     python cli.py risk 100000             # 风控分析
-    python cli.py market                  # 市场状态检测（自动推荐策略）
+    python cli.py market                  # 市场状态检测
     python cli.py market --auto           # 检测并自动切换策略
-    python cli.py backtest                # 运行回测
+    python cli.py backtest                # 历史回测
+    python cli.py history                 # 扫描历史
+    python cli.py history -s 000001       # 股票评分历史
+    python cli.py portfolio list          # 持仓列表
+    python cli.py portfolio buy -s 000001 --shares 1000 -p 10.5  # 记录买入
+    python cli.py portfolio sell -s 000001 --shares 1000 -p 11.0 # 记录卖出
+    python cli.py trades                  # 交易记录
     python cli.py strategy list           # 列出策略
     python cli.py strategy set momentum   # 切换策略
 """
@@ -340,6 +346,204 @@ def backtest(
         console.print(trade_table)
 
     console.print(f"\n[dim]回测说明：基于历史K线滑动窗口技术分析，每次信号使用截至当日数据[/dim]")
+
+
+# ── 历史 ──────────────────────────────────────────────────
+
+@app.command()
+def history(
+    limit: int = typer.Option(20, "--limit", "-n", help="显示条数"),
+    symbol: str = typer.Option(None, "--symbol", "-s", help="查询某只股票的历史"),
+):
+    """查看扫描历史记录。"""
+    a = get_agent()
+
+    if symbol:
+        records = a.get_stock_history(symbol, limit)
+        if not records:
+            console.print(f"[yellow]无 {symbol} 的历史记录[/yellow]")
+            return
+
+        table = Table(title=f"{symbol} 评分历史")
+        table.add_column("时间", style="dim")
+        table.add_column("评分", justify="right")
+        table.add_column("评级")
+        table.add_column("信号")
+        table.add_column("价格", justify="right")
+        table.add_column("PE", justify="right")
+
+        for r in records:
+            signal_styles = {
+                "STRONG_BUY": "[green]🔥[/green]", "BUY": "[green]📈[/green]",
+                "HOLD": "[dim]⏸️[/dim]", "SELL": "[red]📉[/red]",
+                "STRONG_SELL": "[red]💀[/red]",
+            }
+            price = f"¥{r['latest_price']:.2f}" if r.get("latest_price") else "-"
+            pe = f"{r['pe']:.1f}" if r.get("pe") else "-"
+            table.add_row(
+                str(r["scanned_at"])[:16],
+                f"{r['total_score']:.2f}",
+                r["rating"] or "-",
+                signal_styles.get(r["signal"], r["signal"] or "-"),
+                price,
+                pe,
+            )
+        console.print(table)
+    else:
+        scans = a.get_history(limit)
+        if not scans:
+            console.print("[yellow]暂无扫描历史[/yellow]")
+            return
+
+        table = Table(title="扫描历史")
+        table.add_column("#", style="dim", width=4)
+        table.add_column("时间", style="dim")
+        table.add_column("策略")
+        table.add_column("股票数", justify="right")
+        table.add_column("市场状态")
+
+        for i, s in enumerate(scans, 1):
+            table.add_row(
+                str(i),
+                str(s["scanned_at"])[:16],
+                s["strategy"] or "-",
+                str(s["total_stocks"]),
+                s.get("market_regime") or "-",
+            )
+        console.print(table)
+
+        # 数据库统计
+        stats = a.get_db_stats()
+        if stats["total_scans"] > 0:
+            console.print(
+                f"\n[dim]数据库: {stats['db_path']} | "
+                f"总扫描: {stats['total_scans']} | "
+                f"持仓: {stats['active_positions']} | "
+                f"交易: {stats['total_trades']}[/dim]"
+            )
+
+
+# ── 持仓 ──────────────────────────────────────────────────
+
+@app.command()
+def portfolio(
+    action: str = typer.Argument("list", help="list / buy / sell / refresh"),
+    symbol: str = typer.Option(None, "--symbol", "-s", help="股票代码"),
+    shares: int = typer.Option(None, "--shares", help="股数"),
+    price: float = typer.Option(None, "--price", "-p", help="成交价"),
+    name: str = typer.Option(None, "--name", help="股票名称"),
+    reason: str = typer.Option("", "--reason", "-r", help="交易理由"),
+):
+    """管理持仓和交易记录。"""
+    a = get_agent()
+
+    if action == "list":
+        # 先刷新价格
+        try:
+            a.refresh_prices()
+        except Exception:
+            pass
+
+        positions = a.get_portfolio()
+        summary = a.get_portfolio_summary()
+
+        if not positions:
+            console.print("[yellow]暂无活跃持仓[/yellow]")
+        else:
+            table = Table(title="持仓列表")
+            table.add_column("代码", style="cyan")
+            table.add_column("名称")
+            table.add_column("股数", justify="right")
+            table.add_column("成本", justify="right")
+            table.add_column("现价", justify="right")
+            table.add_column("市值", justify="right")
+            table.add_column("盈亏", justify="right")
+            table.add_column("收益率", justify="right")
+
+            for p in positions:
+                profit_color = "green" if (p["profit"] or 0) >= 0 else "red"
+                pnl_color = "green" if (p["profit_pct"] or 0) >= 0 else "red"
+                table.add_row(
+                    p["symbol"],
+                    (p["name"] or "")[:8],
+                    str(p["shares"]),
+                    f"¥{p['avg_cost']:.2f}",
+                    f"¥{p['current_price']:.2f}" if p["current_price"] else "-",
+                    f"¥{p['market_value']:,.0f}" if p["market_value"] else "-",
+                    f"[{profit_color}]¥{p['profit']:,.0f}[/{profit_color}]" if p["profit"] is not None else "-",
+                    f"[{pnl_color}]{p['profit_pct']:+.1f}%[/{pnl_color}]" if p["profit_pct"] is not None else "-",
+                )
+            console.print(table)
+
+        # 汇总
+        console.print(
+            f"\n[bold]持仓汇总[/bold]: "
+            f"{summary['active_count']} 只 | "
+            f"总市值: ¥{summary['total_market_value']:,.0f} | "
+            f"浮动盈亏: [{'green' if summary['active_profit'] >= 0 else 'red'}]¥{summary['active_profit']:,.0f}[/]"
+        )
+
+    elif action == "buy":
+        if not symbol or not shares or not price:
+            console.print("[red]用法: portfolio buy --symbol 000001 --shares 1000 --price 10.5 [--name 平安银行] [--reason 原因][/red]")
+            return
+        a.record_buy(symbol, shares, price, name or "", reason)
+        console.print(f"[green]✅ 记录买入: {symbol} {shares}股 @ ¥{price:.2f}[/green]")
+
+    elif action == "sell":
+        if not symbol or not shares or not price:
+            console.print("[red]用法: portfolio sell --symbol 000001 --shares 1000 --price 11.0 [--reason 原因][/red]")
+            return
+        a.record_sell(symbol, shares, price, name or "", reason)
+        console.print(f"[green]✅ 记录卖出: {symbol} {shares}股 @ ¥{price:.2f}[/green]")
+
+    elif action == "refresh":
+        with console.status("[bold green]正在刷新持仓价格...[/bold green]"):
+            a.refresh_prices()
+        console.print("[green]✅ 持仓价格已刷新[/green]")
+
+    else:
+        console.print("[red]用法: portfolio list|buy|sell|refresh[/red]")
+
+
+# ── 交易记录 ──────────────────────────────────────────────
+
+@app.command()
+def trades(
+    limit: int = typer.Option(20, "--limit", "-n", help="显示条数"),
+):
+    """查看交易记录。"""
+    a = get_agent()
+    records = a.get_trades(limit)
+
+    if not records:
+        console.print("[yellow]暂无交易记录[/yellow]")
+        return
+
+    table = Table(title="交易记录")
+    table.add_column("日期", style="dim")
+    table.add_column("代码", style="cyan")
+    table.add_column("操作")
+    table.add_column("股数", justify="right")
+    table.add_column("价格", justify="right")
+    table.add_column("金额", justify="right")
+    table.add_column("费用", justify="right")
+    table.add_column("理由")
+
+    for t in records:
+        action_color = "green" if t["action"] == "BUY" else "red"
+        fees = (t.get("commission") or 0) + (t.get("stamp_tax") or 0)
+        table.add_row(
+            str(t["traded_at"])[:16],
+            t["symbol"],
+            f"[{action_color}]{t['action']}[/{action_color}]",
+            str(t["shares"]),
+            f"¥{t['price']:.2f}",
+            f"¥{t['amount']:,.0f}",
+            f"¥{fees:.2f}" if fees else "-",
+            (t.get("reason") or "")[:20],
+        )
+    console.print(table)
 
 
 # ── 策略管理 ──────────────────────────────────────────────
