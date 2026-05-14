@@ -554,13 +554,17 @@ def trades(
 def daily(
     top_n: int = typer.Option(50, "--top", "-n", help="扫描数量"),
     strategy: str = typer.Option("trend", "--strategy", "-s", help="策略名称"),
-    output: str = typer.Option("", "--output", "-o", help="输出文件路径（默认 ~/.a-stock-agent/daily/）"),
+    output: str = typer.Option("", "--output", "-o", help="输出文件路径"),
     silent: bool = typer.Option(False, "--silent", help="静默模式（适合cron）"),
+    notify: bool = typer.Option(False, "--notify", help="推送报告到已配置的通知渠道"),
 ):
     """一键生成每日分析报告。适合定时任务。
     
-    自动完成：市场状态检测 → 全市场扫描 → 评分持久化 → 报告生成 → 保存文件
+    自动完成：市场状态检测 → 自适应权重 → 全市场扫描 → 资金面分析 → 报告 → 可选推送
     """
+    from analysis.adaptive_weights import AdaptiveWeights
+    from analysis.capital_flow import CapitalFlowAnalyzer
+
     a = get_agent(strategy)
 
     # 输出目录
@@ -577,19 +581,32 @@ def daily(
     if status_text:
         with console.status(status_text):
             state = a.detect_market_state()
+            weights = AdaptiveWeights().adjust(state.regime)
             scores = a.scan_market(top_n=top_n, verbose=not silent)
 
             # 记录市场状态到扫描
             if a._current_scan_id:
-                # 更新扫描记录的市场状态（通过SQL直接更新）
                 a.store._get_conn().execute(
                     "UPDATE scans SET market_regime=?, market_risk=? WHERE id=?",
                     (state.regime_cn, state.risk_level, a._current_scan_id),
                 )
                 a.store._get_conn().commit()
 
-            # 生成报告
-            report_lines = _build_daily_report(scores, state, a.config.strategy)
+            # 自适应权重调整评分
+            weights_obj = AdaptiveWeights()
+            weights_obj.adjust(state.regime)
+            scores = weights_obj.apply_weights(scores)
+
+            # 资金面附加
+            cf = CapitalFlowAnalyzer()
+            flow = cf.analyze()
+            for s in scores:
+                if flow["total_score"] > 0:
+                    s.reasons.append(f"北向资金{flow['north_trend']}")
+                elif flow["total_score"] < 0:
+                    s.warnings.append(f"北向资金{flow['north_trend']}")
+
+            report_lines = _build_daily_report(scores, state, a.config.strategy, weights_obj)
     else:
         state = a.detect_market_state()
         scores = a.scan_market(top_n=top_n, verbose=False)
@@ -602,7 +619,19 @@ def daily(
             )
             conn.commit()
 
-        report_lines = _build_daily_report(scores, state, a.config.strategy)
+        weights_obj = AdaptiveWeights()
+        weights_obj.adjust(state.regime)
+        scores = weights_obj.apply_weights(scores)
+
+        cf = CapitalFlowAnalyzer()
+        flow = cf.analyze()
+        for s in scores:
+            if flow["total_score"] > 0:
+                s.reasons.append(f"北向资金{flow['north_trend']}")
+            elif flow["total_score"] < 0:
+                s.warnings.append(f"北向资金{flow['north_trend']}")
+
+        report_lines = _build_daily_report(scores, state, a.config.strategy, weights_obj)
 
     # 写入文件
     report_text = "\n".join(report_lines)
@@ -626,8 +655,32 @@ def daily(
     if silent:
         print(output)
 
+    # 通知推送
+    if notify:
+        try:
+            from agent.notifier import Notifier
+            n = Notifier()
+            channels = n.configured_channels
+            if channels:
+                summary = (
+                    f"市场状态: {state.regime_cn}\n"
+                    f"风险: {state.risk_level}\n"
+                    f"推荐策略: {state.recommended_strategy}\n"
+                    f"买入信号: {buy_count} | 卖出: {sell_count}\n"
+                    f"完整报告: {output}"
+                )
+                results = n.broadcast(summary, title="A股每日分析")
+                pushed = [ch for ch, ok in results.items() if ok]
+                if pushed and not silent:
+                    console.print(f"[green]📨 已推送到: {', '.join(pushed)}[/green]")
+            elif not silent:
+                console.print("[yellow]⚠️ 未配置通知渠道，跳过推送[/yellow]")
+                console.print("[dim]设置环境变量: TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL / WECOM_WEBHOOK_URL[/dim]")
+        except Exception as e:
+            logger.warning("通知推送失败: %s", e)
 
-def _build_daily_report(scores, state, strategy_name):
+
+def _build_daily_report(scores, state, strategy_name, weights=None):
     """构建每日报告内容（Markdown格式）。"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -751,7 +804,7 @@ def export(
 def accuracy():
     """计算历史交易信号准确率。"""
     a = get_agent()
-    
+
     with console.status("[bold green]正在计算信号准确率...[/bold green]"):
         result = a.calc_accuracy()
 
@@ -797,6 +850,33 @@ def accuracy():
                 "✅" if d["correct"] else "❌",
             )
         console.print(detail_table)
+
+
+# ── 通知测试 ──────────────────────────────────────────────
+
+@app.command()
+def notify():
+    """测试通知推送配置。"""
+    from agent.notifier import Notifier
+    n = Notifier()
+    channels = n.configured_channels
+
+    if not channels:
+        console.print("[yellow]未配置任何通知渠道[/yellow]")
+        console.print("设置以下环境变量之一：")
+        console.print("  TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID")
+        console.print("  DISCORD_WEBHOOK_URL")
+        console.print("  WECOM_WEBHOOK_URL")
+        return
+
+    console.print(f"[green]已配置渠道: {', '.join(channels)}[/green]")
+    results = n.broadcast("🧪 这是来自 a-stock-agent 的测试消息。通知系统配置正常。", title="测试通知")
+
+    for ch, ok in results.items():
+        if ok:
+            console.print(f"  ✅ {ch}")
+        else:
+            console.print(f"  ❌ {ch}")
 
 
 # ── 多周期 ──────────────────────────────────────────────
