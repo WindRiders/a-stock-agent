@@ -503,6 +503,10 @@ class TradingAgent:
         """获取数据库统计。"""
         return self.store.get_stats()
 
+    def calc_accuracy(self) -> Dict:
+        """计算历史信号准确率。"""
+        return self.store.calc_signal_accuracy()
+
     # ── 内部方法 ──────────────────────────────────────────
 
     def _get_stock_list(self) -> pd.DataFrame:

@@ -442,6 +442,119 @@ class DataStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    # ── 信号准确率 ────────────────────────────────────────────
+
+    def track_signal_outcome(
+        self, symbol: str, signal: str, scan_id: int, price: float
+    ) -> int:
+        """记录信号及当时价格，供后续验证。"""
+        # 复用 signals 表，添加 price_at_signal 信息
+        with self._get_conn() as conn:
+            # 更新最近一条同代码同扫描的信号，记录价格
+            conn.execute(
+                """UPDATE signals SET score = ?, reason = reason || ?
+                   WHERE symbol = ? AND scan_id = ?
+                   AND id = (SELECT MAX(id) FROM signals WHERE symbol = ? AND scan_id = ?)""",
+                (price, f" [入场价:¥{price:.2f}]", symbol, scan_id, symbol, scan_id),
+            )
+            conn.commit()
+            return 0
+
+    def calc_signal_accuracy(self, lookback_scans: int = 10) -> Dict:
+        """计算历史信号的准确率。
+
+        逻辑：找出历史上 BUY/STRONG_BUY 信号的股票，
+        对比后续扫描中的价格变化，判断信号是否正确。
+
+        Returns:
+            {
+                "total_signals": N,
+                "correct": N,
+                "wrong": N,
+                "accuracy": float,
+                "avg_return": float,
+                "profit_factor": float,
+                "details": [...]
+            }
+        """
+        with self._get_conn() as conn:
+            # 查找所有买入信号
+            buy_signals = conn.execute(
+                """SELECT DISTINCT s.id as scan_id, s.scanned_at, si.symbol, si.signal, si.latest_price as price
+                   FROM scan_items si
+                   JOIN scans s ON si.scan_id = s.id
+                   WHERE si.signal IN ('BUY', 'STRONG_BUY')
+                     AND si.latest_price > 0
+                   ORDER BY s.scanned_at DESC
+                   LIMIT 200"""
+            ).fetchall()
+
+            if not buy_signals:
+                return {"total_signals": 0, "accuracy": 0, "avg_return": 0}
+
+            details = []
+            correct = 0
+            wrong = 0
+            total_return = 0
+            total_gain = 0
+            total_loss = 0
+
+            for sig in buy_signals:
+                # 找该股票在下一次扫描中的价格
+                next_record = conn.execute(
+                    """SELECT si.latest_price, s.scanned_at
+                       FROM scan_items si
+                       JOIN scans s ON si.scan_id = s.id
+                       WHERE si.symbol = ? AND s.scanned_at > ?
+                         AND si.latest_price > 0
+                       ORDER BY s.scanned_at ASC
+                       LIMIT 1""",
+                    (sig["symbol"], sig["scanned_at"]),
+                ).fetchone()
+
+                if not next_record:
+                    continue
+
+                next_price = next_record["latest_price"]
+                entry_price = sig["price"]
+                if entry_price <= 0:
+                    continue
+
+                pnl_pct = (next_price / entry_price - 1) * 100
+
+                is_correct = pnl_pct > 0
+                if is_correct:
+                    correct += 1
+                    total_gain += pnl_pct
+                else:
+                    wrong += 1
+                    total_loss += abs(pnl_pct)
+
+                total_return += pnl_pct
+                details.append({
+                    "symbol": sig["symbol"],
+                    "signal": sig["signal"],
+                    "entry_date": str(sig["scanned_at"])[:10],
+                    "entry_price": round(entry_price, 2),
+                    "exit_date": str(next_record["scanned_at"])[:10],
+                    "exit_price": round(next_price, 2),
+                    "pnl_pct": round(pnl_pct, 2),
+                    "correct": is_correct,
+                })
+
+            total = correct + wrong
+            return {
+                "total_signals": total,
+                "correct": correct,
+                "wrong": wrong,
+                "accuracy": round(correct / total * 100, 1) if total > 0 else 0,
+                "avg_return": round(total_return / total, 2) if total > 0 else 0,
+                "total_gain": round(total_gain, 2),
+                "total_loss": round(total_loss, 2),
+                "profit_factor": round(total_gain / total_loss, 2) if total_loss > 0 else (999 if total_gain > 0 else 0),
+                "details": details[:30],
+            }
+
     # ── 统计 ────────────────────────────────────────────────
 
     def get_stats(self) -> Dict:

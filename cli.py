@@ -745,6 +745,83 @@ def export(
     console.print(f"[green]✅ 已导出 {len(detail)} 条记录 → {output}[/green]")
 
 
+# ── 准确率 ──────────────────────────────────────────────
+
+@app.command()
+def accuracy():
+    """计算历史交易信号准确率。"""
+    a = get_agent()
+    
+    with console.status("[bold green]正在计算信号准确率...[/bold green]"):
+        result = a.calc_accuracy()
+
+    if result["total_signals"] == 0:
+        console.print("[yellow]暂无足够的买入信号历史数据[/yellow]")
+        console.print("[dim]提示：多运行几次 scan 积累数据后再查看[/dim]")
+        return
+
+    # 概览面板
+    acc_color = "green" if result["accuracy"] >= 60 else ("yellow" if result["accuracy"] >= 40 else "red")
+    pf_color = "green" if result.get("profit_factor", 0) >= 1.5 else "yellow"
+
+    panel = Panel.fit(
+        f"信号总数: {result['total_signals']}\n"
+        f"正确: [green]{result['correct']}[/green] | 错误: [red]{result['wrong']}[/red]\n"
+        f"准确率: [{acc_color}]{result['accuracy']:.1f}%[/{acc_color}]\n"
+        f"平均收益: [{'green' if result['avg_return'] > 0 else 'red'}]{result['avg_return']:+.2f}%[/]\n"
+        f"盈亏比: [{pf_color}]{result.get('profit_factor', 0):.2f}[/{pf_color}]",
+        title="信号准确率分析",
+        border_style="cyan",
+    )
+    console.print(panel)
+
+    # 明细表
+    if result.get("details"):
+        console.print("\n[bold]近期信号明细（前20条）[/bold]")
+        detail_table = Table(show_header=True)
+        detail_table.add_column("日期")
+        detail_table.add_column("代码", style="cyan")
+        detail_table.add_column("入场价", justify="right")
+        detail_table.add_column("出场价", justify="right")
+        detail_table.add_column("收益", justify="right")
+        detail_table.add_column("结果")
+
+        for d in result["details"][:20]:
+            pnl_color = "green" if d["pnl_pct"] > 0 else "red"
+            detail_table.add_row(
+                d["entry_date"],
+                d["symbol"],
+                f"¥{d['entry_price']:.2f}",
+                f"¥{d['exit_price']:.2f}",
+                f"[{pnl_color}]{d['pnl_pct']:+.2f}%[/{pnl_color}]",
+                "✅" if d["correct"] else "❌",
+            )
+        console.print(detail_table)
+
+
+# ── 多周期 ──────────────────────────────────────────────
+
+@app.command()
+def multi(
+    symbol: str = typer.Argument(..., help="股票代码"),
+):
+    """多周期技术分析（日线+周线+月线共振）。"""
+    from analysis.multi_timeframe import MultiTimeframeAnalyzer
+
+    a = get_agent()
+    mta = MultiTimeframeAnalyzer()
+
+    with console.status(f"[bold green]正在多周期分析 {symbol}...[/bold green]"):
+        try:
+            df = a.market_data.get_daily_kline(symbol, start_date="20200101")
+            result = mta.analyze(df, symbol)
+        except Exception as e:
+            console.print(f"[red]分析失败: {e}[/red]")
+            return
+
+    console.print(mta.generate_report(result))
+
+
 # ── 策略管理 ──────────────────────────────────────────────
 
 @app.command()
