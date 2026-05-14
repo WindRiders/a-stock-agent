@@ -313,19 +313,7 @@ class PortfolioBacktest:
                         max_positions=max_positions,
                     )
 
-                if False:  # old branch, now unused
-                    # 传入额外参数
-                    if allocation == "risk_parity":
-                        target_allocation = risk_parity_allocator(
-                            candidates, scores or current_scores, equity,
-                            volatility=volatility, max_positions=max_positions,
-                        )
-                    elif allocation == "kelly":
-                        target_allocation = kelly_allocator(
-                            candidates, scores or current_scores, equity,
-                            win_rate=win_rate, avg_win_loss_ratio=win_loss_ratio,
-                            max_positions=max_positions,
-                        )
+                
 
                 # 执行调仓
                 self._rebalance(target_allocation, price_data, date_str)
