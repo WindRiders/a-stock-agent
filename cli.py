@@ -23,7 +23,9 @@ Usage:
 """
 
 import logging
+import os
 import sys
+from datetime import datetime
 from typing import Optional
 
 import pandas as pd
@@ -544,6 +546,203 @@ def trades(
             (t.get("reason") or "")[:20],
         )
     console.print(table)
+
+
+# ── 日报 ──────────────────────────────────────────────────
+
+@app.command()
+def daily(
+    top_n: int = typer.Option(50, "--top", "-n", help="扫描数量"),
+    strategy: str = typer.Option("trend", "--strategy", "-s", help="策略名称"),
+    output: str = typer.Option("", "--output", "-o", help="输出文件路径（默认 ~/.a-stock-agent/daily/）"),
+    silent: bool = typer.Option(False, "--silent", help="静默模式（适合cron）"),
+):
+    """一键生成每日分析报告。适合定时任务。
+    
+    自动完成：市场状态检测 → 全市场扫描 → 评分持久化 → 报告生成 → 保存文件
+    """
+    a = get_agent(strategy)
+
+    # 输出目录
+    if not output:
+        daily_dir = os.path.expanduser("~/.a-stock-agent/daily")
+        os.makedirs(daily_dir, exist_ok=True)
+        today = datetime.now().strftime("%Y%m%d_%H%M")
+        output = os.path.join(daily_dir, f"report_{today}.md")
+
+    status_text = "[bold green]每日分析中...[/bold green]"
+    if silent:
+        status_text = None
+
+    if status_text:
+        with console.status(status_text):
+            state = a.detect_market_state()
+            scores = a.scan_market(top_n=top_n, verbose=not silent)
+
+            # 记录市场状态到扫描
+            if a._current_scan_id:
+                # 更新扫描记录的市场状态（通过SQL直接更新）
+                a.store._get_conn().execute(
+                    "UPDATE scans SET market_regime=?, market_risk=? WHERE id=?",
+                    (state.regime_cn, state.risk_level, a._current_scan_id),
+                )
+                a.store._get_conn().commit()
+
+            # 生成报告
+            report_lines = _build_daily_report(scores, state, a.config.strategy)
+    else:
+        state = a.detect_market_state()
+        scores = a.scan_market(top_n=top_n, verbose=False)
+
+        if a._current_scan_id:
+            conn = a.store._get_conn()
+            conn.execute(
+                "UPDATE scans SET market_regime=?, market_risk=? WHERE id=?",
+                (state.regime_cn, state.risk_level, a._current_scan_id),
+            )
+            conn.commit()
+
+        report_lines = _build_daily_report(scores, state, a.config.strategy)
+
+    # 写入文件
+    report_text = "\n".join(report_lines)
+    with open(output, "w", encoding="utf-8") as f:
+        f.write(report_text)
+
+    buy_count = sum(1 for s in scores if s.signal in ("BUY", "STRONG_BUY"))
+    sell_count = sum(1 for s in scores if s.signal in ("SELL", "STRONG_SELL"))
+
+    if not silent:
+        console.print(f"\n[green]✅ 每日报告已保存: {output}[/green]")
+        console.print(
+            f"[dim]状态: {state.regime_cn} | "
+            f"策略: {state.recommended_strategy} | "
+            f"风险: {state.risk_level} | "
+            f"扫描: {len(scores)}只 | "
+            f"买入: {buy_count} | 卖出: {sell_count}[/dim]"
+        )
+
+    # 静默模式下输出路径到stdout（方便cron脚本捕获）
+    if silent:
+        print(output)
+
+
+def _build_daily_report(scores, state, strategy_name):
+    """构建每日报告内容（Markdown格式）。"""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    lines = [
+        f"# A股每日分析报告",
+        f"",
+        f"**生成时间**: {now}  ",
+        f"**策略引擎**: {strategy_name}  ",
+        f"",
+        f"## 市场状态",
+        f"",
+        f"- **当前状态**: {state.regime_cn}",
+        f"- **趋势方向**: {state.trend_direction}",
+        f"- **波动水平**: {state.volatility_regime}（年化 {state.volatility*100:.1f}%）",
+        f"- **风险等级**: {state.risk_level}",
+        f"- **推荐策略**: `{state.recommended_strategy}`（置信度 {state.strategy_confidence:.0%}）",
+        f"- **30日最大回撤**: {state.max_drawdown_30d*100:.1f}%",
+        f"",
+    ]
+
+    if state.warnings:
+        lines.append("### 风险提示")
+        for w in state.warnings:
+            lines.append(f"- ⚠️ {w}")
+        lines.append("")
+
+    lines.append("## 买入信号 TOP 10")
+    lines.append("")
+    lines.append("| # | 代码 | 名称 | 评分 | 评级 | 信号 | PE | 最新价 |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+
+    buy_scores = [s for s in scores if s.signal in ("BUY", "STRONG_BUY")][:10]
+    if not buy_scores:
+        buy_scores = sorted(scores, key=lambda x: x.total_score, reverse=True)[:10]
+
+    for i, s in enumerate(buy_scores, 1):
+        pe_str = f"{s.pe:.1f}" if s.pe and s.pe > 0 else "-"
+        price_str = f"¥{s.latest_price:.2f}" if s.latest_price else "-"
+        signal_icon = "🔥" if s.signal == "STRONG_BUY" else ("📈" if s.signal == "BUY" else "⏸️")
+        lines.append(
+            f"| {i} | {s.symbol} | {(s.name or '')[:8]} | {s.total_score:.2f} | {s.rating} | {signal_icon} | {pe_str} | {price_str} |"
+        )
+
+    lines.append("")
+    lines.append("## 风险汇总")
+    lines.append("")
+    all_warnings = []
+    for s in scores:
+        all_warnings.extend(s.warnings)
+    seen = set()
+    for w in all_warnings[:10]:
+        if w not in seen:
+            seen.add(w)
+            lines.append(f"- • {w}")
+
+    if not [w for w in all_warnings if w]:
+        lines.append("暂无重大风险信号。")
+
+    lines.append("")
+    lines.append("---")
+    lines.append(f"*本报告由 a-stock-agent 自动生成，仅供参考，不构成投资建议。*")
+
+    return lines
+
+
+# ── 导出 ──────────────────────────────────────────────────
+
+@app.command()
+def export(
+    scan_id: int = typer.Option(None, "--scan", help="导出指定扫描ID（默认最新）"),
+    fmt: str = typer.Option("csv", "--format", "-f", help="csv / json / md"),
+    output: str = typer.Option("", "--output", "-o", help="输出文件路径"),
+):
+    """导出扫描结果为 CSV/JSON/Markdown。"""
+    a = get_agent()
+
+    if scan_id is None:
+        history = a.get_history(1)
+        if not history:
+            console.print("[red]无扫描记录[/red]")
+            return
+        scan_id = history[0]["id"]
+
+    detail = a.store.get_scan_detail(scan_id)
+    if not detail:
+        console.print(f"[red]扫描 #{scan_id} 无数据[/red]")
+        return
+
+    if not output:
+        output = os.path.expanduser(f"~/a-stock-export-{scan_id}.{fmt}")
+
+    if fmt == "csv":
+        import csv
+        with open(output, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=detail[0].keys())
+            writer.writeheader()
+            writer.writerows(detail)
+
+    elif fmt == "json":
+        import json
+        with open(output, "w", encoding="utf-8") as f:
+            json.dump(detail, f, ensure_ascii=False, indent=2, default=str)
+
+    elif fmt == "md":
+        lines = ["# 扫描结果导出", "", f"扫描ID: {scan_id}", "", "| 代码 | 名称 | 评分 | 评级 | 信号 | 技术 | 基本 | PE |", "|---|---|---|---|---|---|---|---|---|"]
+        for d in detail:
+            lines.append(f"| {d['symbol']} | {(d.get('name') or '')[:8]} | {d['total_score']:.2f} | {d['rating']} | {d['signal']} | {d.get('tech_score', 0):+d} | {d.get('fund_score', 0):+d} | {d.get('pe') or '-'} |")
+        with open(output, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+    else:
+        console.print(f"[red]不支持的格式: {fmt}（支持 csv/json/md）[/red]")
+        return
+
+    console.print(f"[green]✅ 已导出 {len(detail)} 条记录 → {output}[/green]")
 
 
 # ── 策略管理 ──────────────────────────────────────────────
