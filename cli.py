@@ -1445,6 +1445,264 @@ def api(
     serve(host=host, port=port)
 
 
+# ── 因子挖掘 ──────────────────────────────────────────────
+
+@app.command()
+def factors(
+    symbol: str = typer.Option("000001", "--symbol", "-s", help="股票代码"),
+    min_ic: float = typer.Option(0.02, "--min-ic", help="最小IC阈值"),
+    discover: bool = typer.Option(False, "--discover", help="自动发现新因子"),
+):
+    """因子挖掘：计算内置因子、IC分析、自动发现。"""
+    from factor_engine import FactorEngine
+
+    engine = FactorEngine()
+    a = get_agent()
+
+    with console.status(f"[bold green]获取 {symbol} K线数据...[/bold green]"):
+        kline = a.market_data.get_daily_kline(symbol)
+        if kline.empty:
+            console.print(f"[red]无法获取 {symbol} K线数据[/red]")
+            return
+
+    with console.status("[bold green]计算因子...[/bold green]"):
+        factors = engine.compute_all(kline)
+
+    console.print(f"[green]✅ 已计算 {len(factors)} 个因子[/green]")
+
+    with console.status("[bold green]IC分析...[/bold green]"):
+        fwd_ret = kline["close"].pct_change(5).shift(-5)
+        ic_results = engine.analyze_ic(factors, fwd_ret)
+
+    if not ic_results:
+        console.print("[yellow]IC分析无有效结果（可能数据不足）[/yellow]")
+        return
+
+    console.print(engine.generate_report(ic_results))
+
+    # 筛选最佳因子
+    best = engine.select_factors(ic_results, min_ic=min_ic)
+    if best:
+        console.print(f"\n[bold green]🏆 筛选出 {len(best)} 个有效因子:[/bold green]")
+        console.print("  " + ", ".join(best))
+
+        # 合成
+        combined = engine.synthesize(best)
+        console.print(f"\n[dim]合成因子 IC={combined.values.corr(fwd_ret.rank(pct=True), method='spearman'):.4f}[/dim]")
+
+    if discover:
+        with console.status("[bold green]自动发现新因子...[/bold green]"):
+            discoveries = engine.discover(list(factors.keys()))
+        if discoveries:
+            console.print(f"\n[bold cyan]💡 发现 {len(discoveries)} 个候选因子:[/bold cyan]")
+            for name, expr, ic in discoveries[:10]:
+                console.print(f"  {name:<30s} IC={ic:.4f}  ({expr})")
+        else:
+            console.print("[dim]未发现优于基础因子的新组合[/dim]")
+
+
+# ── ML 模型 ──────────────────────────────────────────────
+
+@app.command()
+def ml(
+    action: str = typer.Argument("train", help="train / predict / backtest / info"),
+    symbol: str = typer.Option("000001", "--symbol", "-s", help="股票代码"),
+    model_type: str = typer.Option("xgboost", "--model", "-m", help="xgboost / lstm"),
+    horizon: int = typer.Option(5, "--horizon", "-h", help="预测周期(天)"),
+    save: bool = typer.Option(False, "--save", help="保存模型"),
+):
+    """ML择时模型：训练/预测/回测。"""
+    from ml_model import MLTimingModel
+
+    a = get_agent()
+
+    if action == "info":
+        console.print("[bold]ML择时模型[/bold]")
+        console.print("  XGBoost: 梯度提升树，特征→涨/跌/平三分类")
+        console.print("  LSTM:    长短期记忆网络，时序预测")
+        console.print("  特征数:  30+ 技术/量价/波动/日历特征")
+        console.print(f"\n[dim]用法: ml train --symbol 000001 --model xgboost --horizon 5 --save[/dim]")
+        return
+
+    with console.status(f"[bold green]加载 {symbol} K线数据...[/bold green]"):
+        kline = a.market_data.get_daily_kline(symbol)
+        if kline.empty:
+            console.print(f"[red]无法获取 {symbol} K线数据[/red]")
+            return
+
+    console.print(f"[dim]数据: {len(kline)}条, 预测周期: {horizon}天, 模型: {model_type}[/dim]")
+
+    model = MLTimingModel(model_type=model_type)
+
+    if action == "train":
+        with console.status(f"[bold green]训练 {model_type} 模型...[/bold green]"):
+            model.train(kline, horizon=horizon, verbose=False)
+
+        console.print(f"[green]✅ 训练完成 ({len(kline)}样本)[/green]")
+
+        # 回测展示
+        with console.status("[bold green]回测评估...[/bold green]"):
+            result = model.backtest(kline, horizon=horizon)
+
+        console.print(model.generate_report(result))
+
+        if save:
+            path = model.save()
+            console.print(f"[green]✅ 模型已保存: {path}[/green]")
+
+    elif action == "predict":
+        model.train(kline, horizon=horizon, verbose=False)
+        pred = model.predict(kline)
+
+        signal_color = {
+            "BUY": "green", "SELL": "red", "HOLD": "yellow",
+        }.get(pred.signal, "white")
+
+        console.print(f"\n[bold]预测结果: {symbol}[/bold]")
+        console.print(f"  方向:     [{signal_color}]{pred.direction}[/{signal_color}]")
+        console.print(f"  置信度:   {pred.confidence:.1%}")
+        console.print(f"  信号:     [{signal_color}]{pred.signal}[/{signal_color}]")
+        console.print(f"  预期收益: {pred.expected_return:+.2%}")
+        console.print(f"  P(涨):    {pred.proba_up:.1%}")
+        console.print(f"  P(平):    {pred.proba_flat:.1%}")
+        console.print(f"  P(跌):    {pred.proba_down:.1%}")
+
+    elif action == "backtest":
+        with console.status(f"[bold green]{model_type} Walk-Forward 回测...[/bold green]"):
+            result = model.backtest(kline, horizon=horizon)
+
+        console.print(model.generate_report(result))
+
+    else:
+        console.print("[red]用法: ml train|predict|backtest|info[/red]")
+
+
+# ── 券商对接 ──────────────────────────────────────────────
+
+@app.command()
+def broker(
+    action: str = typer.Argument("account", help="account / positions / orders / buy / sell / list"),
+    symbol: str = typer.Option(None, "--symbol", "-s", help="股票代码"),
+    price: float = typer.Option(None, "--price", "-p", help="价格"),
+    volume: int = typer.Option(None, "--volume", "-v", help="股数"),
+    amount: float = typer.Option(None, "--amount", "-a", help="金额"),
+    broker_name: str = typer.Option("mock", "--broker", "-b", help="券商: mock / htsc / eastmoney"),
+    reason: str = typer.Option("", "--reason", "-r", help="交易理由"),
+):
+    """券商对接：账户查询/下单/持仓。默认使用模拟券商。"""
+    from broker import get_broker, list_brokers, detect_broker
+
+    if action == "list":
+        brokers = list_brokers()
+        for name, desc in brokers.items():
+            console.print(f"  [cyan]{name:<12s}[/cyan] {desc}")
+        detected = detect_broker()
+        console.print(f"\n[dim]自动检测: {detected}[/dim]")
+        return
+
+    try:
+        b = get_broker(broker_name)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        return
+
+    if action == "account":
+        account = b.query_account()
+        panel = Panel.fit(
+            f"券商: {account.broker_name}\n"
+            f"账户: {account.account_id}\n"
+            f"总资产: ¥{account.total_asset:,.0f}\n"
+            f"可用资金: ¥{account.available_cash:,.0f}\n"
+            f"冻结资金: ¥{account.frozen_cash:,.0f}\n"
+            f"持仓市值: ¥{account.market_value:,.0f}\n"
+            f"总收益: ¥{account.total_return:+,.0f}\n"
+            f"当日收益: ¥{account.daily_return:+,.0f}",
+            title="账户信息",
+            border_style="cyan",
+        )
+        console.print(panel)
+
+    elif action == "positions":
+        positions = b.query_positions()
+        if not positions:
+            console.print("[yellow]无持仓[/yellow]")
+            return
+
+        table = Table(title="持仓列表")
+        table.add_column("代码", style="cyan")
+        table.add_column("名称")
+        table.add_column("股数", justify="right")
+        table.add_column("成本", justify="right")
+        table.add_column("现价", justify="right")
+        table.add_column("市值", justify="right")
+        table.add_column("盈亏", justify="right")
+
+        for p in positions:
+            color = "green" if p.profit >= 0 else "red"
+            table.add_row(
+                p.symbol, p.name or "-",
+                str(p.shares),
+                f"¥{p.avg_cost:.2f}",
+                f"¥{p.current_price:.2f}",
+                f"¥{p.market_value:,.0f}",
+                f"[{color}]¥{p.profit:+,.0f}[/{color}]",
+            )
+        console.print(table)
+
+    elif action == "orders":
+        orders = b.query_orders()
+        if not orders:
+            console.print("[yellow]无委托[/yellow]")
+            return
+
+        for o in orders[:20]:
+            status_color = {
+                "FILLED": "green", "SUBMITTED": "yellow",
+                "CANCELLED": "dim", "REJECTED": "red",
+            }.get(o.status.value, "white")
+            console.print(
+                f"  {o.order_id} {o.symbol} "
+                f"[{o.side.value}] {o.volume}股 @¥{o.price:.2f} "
+                f"[{status_color}]{o.status.value}[/{status_color}]"
+            )
+
+    elif action == "buy":
+        if not symbol or not price or not volume:
+            console.print("[red]用法: broker buy --symbol 000001 --price 10.5 --volume 1000[/red]")
+            return
+        order = b.buy(symbol, price, volume, reason=reason)
+        if order.status.value == "REJECTED":
+            console.print(f"[red]❌ 买入失败: {order.reason}[/red]")
+        else:
+            console.print(f"[green]✅ 买入委托: {symbol} {volume}股 @ ¥{price:.2f} | {order.order_id}[/green]")
+
+    elif action == "sell":
+        if not symbol or not price or not volume:
+            console.print("[red]用法: broker sell --symbol 000001 --price 11.0 --volume 1000[/red]")
+            return
+        order = b.sell(symbol, price, volume, reason=reason)
+        if order.status.value == "REJECTED":
+            console.print(f"[red]❌ 卖出失败: {order.reason}[/red]")
+        else:
+            console.print(f"[green]✅ 卖出委托: {symbol} {volume}股 @ ¥{price:.2f} | {order.order_id}[/green]")
+
+    elif action == "amount":
+        """按金额买入。"""
+        if not symbol or not price or not amount:
+            console.print("[red]用法: broker amount --symbol 000001 --price 10.5 --amount 50000[/red]")
+            return
+        order = b.buy_by_amount(symbol, price, amount, reason=reason)
+        if order.status.value == "REJECTED":
+            console.print(f"[red]❌ 买入失败: {order.reason}[/red]")
+        else:
+            console.print(f"[green]✅ 买入委托: {symbol} {order.volume}股 @ ¥{price:.2f} | {order.order_id}[/green]")
+
+    else:
+        console.print("[red]用法: broker account|positions|orders|buy|sell|amount|list[/red]")
+
+    b.disconnect()
+
+
 # ── main ───────────────────────────────────────────────────
 
 def main():
