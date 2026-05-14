@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # ── Web 可视化面板 ──────────────────────────────
+  web:
+    build: .
+    image: a-stock-agent:latest
+    container_name: a-stock-web
+    command: web --host 0.0.0.0 --port 8501
+    ports:
+      - "8501:8501"
+    volumes:
+      - astock_data:/root/.a-stock-agent
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── REST API 服务 ───────────────────────────────
+  api:
+    build: .
+    image: a-stock-agent:latest
+    container_name: a-stock-api
+    command: api --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - astock_data:/root/.a-stock-agent
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── 定时任务（每日收盘后自动扫描+报告）───────────
+  cron:
+    build: .
+    image: a-stock-agent:latest
+    container_name: a-stock-cron
+    # 交易日 15:30 自动运行（通过外部 cron 调度或内部调度器）
+    command: >
+      sh -c '
+      while true; do
+        echo "Waiting for next market close (15:30 CST)..."
+        python -c "import time; time.sleep(3600)"
+        python cli.py daily --silent --notify -n 50
+        sleep 3600
+      done'
+    volumes:
+      - astock_data:/root/.a-stock-agent
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+
+volumes:
+  astock_data:
+    name: a-stock-agent-data

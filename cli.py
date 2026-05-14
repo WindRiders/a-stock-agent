@@ -1289,6 +1289,162 @@ def web(
     ])
 
 
+# ── 自选股 ──────────────────────────────────────────────
+
+@app.command()
+def watchlist(
+    action: str = typer.Argument("list", help="list / add / remove / scan / alerts / tags"),
+    symbol: str = typer.Option(None, "--symbol", "-s", help="股票代码"),
+    name: str = typer.Option(None, "--name", help="股票名称"),
+    tags: str = typer.Option("", "--tags", help="逗号分隔标签"),
+    alert_rule: str = typer.Option("", "--alert", help="告警规则，如 pct_change_gt=5"),
+    strategy: str = typer.Option("trend", "--strategy", help="扫描策略"),
+):
+    """管理自选股监视列表。"""
+    from watchlist import Watchlist
+
+    wl = Watchlist()
+
+    if action == "list":
+        items = wl.list()
+        if not items:
+            console.print("[yellow]自选股列表为空[/yellow]")
+            console.print("[dim]使用 watchlist add --symbol 000001 --name 平安银行 添加[/dim]")
+            return
+
+        table = Table(title="自选股列表")
+        table.add_column("代码", style="cyan")
+        table.add_column("名称")
+        table.add_column("标签")
+        table.add_column("告警条件")
+        table.add_column("添加时间", style="dim")
+
+        for item in items:
+            alert_str = ", ".join(f"{k}={v}" for k, v in item.alerts.items()) or "-"
+            table.add_row(
+                item.symbol,
+                item.name or "-",
+                ", ".join(item.tags) or "-",
+                alert_str,
+                item.added_at[:16] if item.added_at else "-",
+            )
+        console.print(table)
+
+        stats = wl.stats()
+        console.print(f"\n[dim]共 {stats['total']} 只 | {stats['with_alerts']} 只设告警 | 文件: {stats['path']}[/dim]")
+
+    elif action == "add":
+        if not symbol:
+            console.print("[red]请指定 --symbol 股票代码[/red]")
+            return
+
+        alerts = {}
+        if alert_rule:
+            for part in alert_rule.split(","):
+                part = part.strip()
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    try:
+                        alerts[k.strip()] = float(v.strip())
+                    except ValueError:
+                        alerts[k.strip()] = v.strip()
+
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+        wl.add(symbol, name=name or "", tags=tag_list, alerts=alerts)
+        console.print(f"[green]✅ 已添加自选股: {symbol}{' ' + name if name else ''}[/green]")
+
+    elif action == "remove":
+        if not symbol:
+            console.print("[red]请指定 --symbol 股票代码[/red]")
+            return
+        wl.remove(symbol)
+        console.print(f"[green]✅ 已移除: {symbol}[/green]")
+
+    elif action == "scan":
+        items = wl.list()
+        if not items:
+            console.print("[yellow]自选股列表为空[/yellow]")
+            return
+
+        a = get_agent(strategy)
+        with console.status(f"[bold green]扫描 {len(items)} 只自选股...[/bold green]"):
+            results = wl.scan(a)
+            alerts = wl.check_alerts(results)
+
+        if not results:
+            console.print("[yellow]扫描无结果[/yellow]")
+            return
+
+        table = Table(title="自选股扫描结果")
+        table.add_column("代码", style="cyan")
+        table.add_column("名称")
+        table.add_column("评分", justify="right")
+        table.add_column("评级")
+        table.add_column("信号")
+        table.add_column("价格", justify="right")
+        table.add_column("涨跌", justify="right")
+
+        for r in sorted(results, key=lambda x: x.score, reverse=True):
+            pct_color = "green" if r.pct_change >= 0 else "red"
+            table.add_row(
+                r.symbol, r.name or "-",
+                f"{r.score:.2f}", r.rating, r.signal,
+                f"¥{r.latest_price:.2f}" if r.latest_price else "-",
+                f"[{pct_color}]{r.pct_change:+.2f}%[/{pct_color}]",
+            )
+        console.print(table)
+
+        # 告警
+        if alerts:
+            console.print(f"\n[bold red]⚠️ {len(alerts)} 条告警触发[/bold red]")
+            for a in alerts:
+                console.print(f"  [{a.severity}]{a.message}[/]")
+
+    elif action == "alerts":
+        if not symbol:
+            console.print("[red]请指定 --symbol 股票代码[/red]")
+            return
+        item = wl.get(symbol)
+        if not item:
+            console.print(f"[yellow]{symbol} 不在自选股列表中[/yellow]")
+            return
+        if not item.alerts:
+            console.print(f"[dim]{symbol} 无告警条件[/dim]")
+        else:
+            console.print(f"[bold]{symbol} {item.name}[/bold] 的告警条件:")
+            for k, v in item.alerts.items():
+                console.print(f"  {k}: {v}")
+        console.print("[dim]设置告警: watchlist add --symbol {symbol} --alert pct_change_gt=5,pct_change_lt=-5[/dim]")
+
+    elif action == "tags":
+        if not symbol or not tags:
+            console.print("[red]用法: watchlist tags --symbol 000001 --tags 科技,龙头[/red]")
+            return
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        wl.tag(symbol, *tag_list)
+        console.print(f"[green]✅ {symbol} 标签已更新: {', '.join(tag_list)}[/green]")
+
+    else:
+        console.print("[red]用法: watchlist list|add|remove|scan|alerts|tags[/red]")
+
+
+# ── API 服务 ──────────────────────────────────────────────
+
+@app.command()
+def api(
+    port: int = typer.Option(8000, "--port", "-p", help="监听端口"),
+    host: str = typer.Option("0.0.0.0", "--host", help="监听地址"),
+):
+    """启动 REST API 服务（FastAPI）。文档: http://localhost:8000/docs"""
+    from api_server import serve
+    console.print(f"[bold green]🚀 启动 API 服务...[/bold green]")
+    console.print(f"[dim]地址: http://{host}:{port}[/dim]")
+    console.print(f"[dim]文档: http://{host}:{port}/docs[/dim]")
+    console.print("[dim]按 Ctrl+C 停止[/dim]")
+    serve(host=host, port=port)
+
+
 # ── main ───────────────────────────────────────────────────
 
 def main():
