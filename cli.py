@@ -1042,6 +1042,253 @@ def _print_strategy_info(name: str):
         console.print(f"[red]{e}[/red]")
 
 
+# ── 配置管理 ──────────────────────────────────────────────
+
+@app.command()
+def config(
+    action: str = typer.Argument("show", help="show / save / reset / backups / restore"),
+    strategy: str = typer.Option(None, "--strategy", "-s", help="设置策略"),
+    max_positions: int = typer.Option(None, "--max-positions", help="最大持仓数"),
+    stop_loss: float = typer.Option(None, "--stop-loss", help="止损比例 %，如 -8"),
+    take_profit: float = typer.Option(None, "--take-profit", help="止盈比例 %，如 20"),
+    llm_enabled: bool = typer.Option(None, "--llm/--no-llm", help="启用/禁用 LLM"),
+    llm_model: str = typer.Option(None, "--llm-model", help="LLM 模型名"),
+    backup_name: str = typer.Option(None, "--backup", help="备份文件名（恢复用）"),
+):
+    """管理配置文件 ~/.a-stock-agent/config.yaml"""
+    from agent.config_file import ConfigManager
+
+    mgr = ConfigManager()
+
+    if action == "show":
+        if mgr.exists():
+            console.print(f"[dim]配置文件: {mgr.get_path()}[/dim]\n")
+            console.print(mgr.show())
+        else:
+            console.print("[yellow]配置文件不存在[/yellow]")
+            console.print("运行 'config save' 创建默认配置")
+
+    elif action == "save":
+        cfg = mgr.load()
+        if strategy:
+            cfg.strategy = strategy
+        if max_positions is not None:
+            cfg.max_positions = max_positions
+        if stop_loss is not None:
+            cfg.stop_loss_pct = stop_loss
+        if take_profit is not None:
+            cfg.take_profit_pct = take_profit
+        if llm_enabled is not None:
+            cfg.llm_enabled = llm_enabled
+        if llm_model:
+            cfg.llm_model = llm_model
+        mgr.save(cfg)
+        console.print(f"[green]✅ 配置已保存: {mgr.get_path()}[/green]")
+
+    elif action == "reset":
+        mgr.reset()
+        console.print("[green]✅ 配置已重置为默认值[/green]")
+
+    elif action == "backups":
+        backups = mgr.list_backups()
+        if not backups:
+            console.print("[yellow]暂无备份[/yellow]")
+            return
+        for b in backups:
+            console.print(f"  {b['filename']}  ({b['size']} bytes)")
+
+    elif action == "restore":
+        if not backup_name:
+            console.print("[red]请指定 --backup 文件名[/red]")
+            return
+        try:
+            cfg = mgr.restore(backup_name)
+            console.print(f"[green]✅ 已从备份恢复: {backup_name}[/green]")
+        except FileNotFoundError as e:
+            console.print(f"[red]{e}[/red]")
+
+    else:
+        console.print("[red]用法: config show|save|reset|backups|restore[/red]")
+
+
+# ── 模拟盘 ──────────────────────────────────────────────
+
+@app.command()
+def paper(
+    action: str = typer.Argument("summary", help="summary / buy / sell / reset / snapshot"),
+    symbol: str = typer.Option(None, "--symbol", "-s", help="股票代码"),
+    price: float = typer.Option(None, "--price", "-p", help="成交价"),
+    shares: int = typer.Option(None, "--shares", help="股数"),
+    amount: float = typer.Option(None, "--amount", "-a", help="买入金额"),
+    reason: str = typer.Option("", "--reason", "-r", help="交易理由"),
+    initial: float = typer.Option(100000, "--initial", help="初始资金"),
+):
+    """模拟盘/纸面交易。数据持久化到 ~/.a-stock-agent/paper.db"""
+    from paper_trading import PaperTrader
+
+    db = os.path.expanduser("~/.a-stock-agent/paper.db")
+    trader = PaperTrader(initial_capital=initial, db_path=db)
+
+    if action == "summary":
+        s = trader.summary()
+        panel = Panel.fit(
+            f"初始资金: ¥{s.initial_capital:,.0f}\n"
+            f"当前权益: ¥{s.equity:,.0f}\n"
+            f"总收益: [{'green' if s.total_return >= 0 else 'red'}]{s.total_return_pct:+.2f}%[/]\n"
+            f"现金: ¥{s.cash:,.0f}\n"
+            f"交易次数: {s.total_trades}\n"
+            f"胜率: {s.win_rate:.1f}%\n"
+            f"夏普: {s.sharpe_ratio:.2f}\n"
+            f"最大回撤: {s.max_drawdown:.2f}%\n"
+            f"持仓数: {s.active_positions}",
+            title="模拟盘汇总",
+            border_style="cyan",
+        )
+        console.print(panel)
+
+        positions = trader.positions_list()
+        if positions:
+            console.print("\n[bold]当前持仓[/bold]")
+            for p in positions:
+                color = "green" if p["unrealized_pnl"] >= 0 else "red"
+                console.print(
+                    f"  {p['symbol']} {p['name']:<6s} "
+                    f"{p['shares']}股 "
+                    f"成本¥{p['avg_cost']:.2f} → 现价¥{p['current_price']:.2f} "
+                    f"[{color}]{p['unrealized_pnl']:+,.0f} ({p['unrealized_pnl_pct']:+.1f}%)[/]"
+                )
+
+    elif action == "buy":
+        if not symbol or not price:
+            console.print("[red]用法: paper buy --symbol 000001 --price 10.5 --shares 1000 [--reason 原因][/red]")
+            return
+        trade = trader.execute(symbol, "BUY", price, shares or 0, reason=reason, amount=amount or 0)
+        if trade:
+            trader.take_snapshot()
+            console.print(f"[green]✅ 模拟买入: {symbol} {trade.shares}股 @ ¥{price:.2f}[/green]")
+        else:
+            console.print("[red]买入失败（资金不足/股数不足）[/red]")
+
+    elif action == "sell":
+        if not symbol or not price:
+            console.print("[red]用法: paper sell --symbol 000001 --price 11.0 [--shares 1000] [--reason 原因][/red]")
+            return
+        trade = trader.execute(symbol, "SELL", price, shares or 0, reason=reason)
+        if trade:
+            trader.take_snapshot()
+            console.print(
+                f"[green]✅ 模拟卖出: {symbol} {trade.shares}股 @ ¥{price:.2f} "
+                f"| 盈亏: [{'green' if trade.realized_pnl>=0 else 'red'}]{trade.realized_pnl:+,.0f}[/]"
+            )
+        else:
+            console.print("[red]卖出失败（无持仓/股数不足）[/red]")
+
+    elif action == "reset":
+        trader.reset()
+        console.print("[green]✅ 模拟盘已重置[/green]")
+
+    elif action == "snapshot":
+        snap = trader.take_snapshot()
+        console.print(f"[green]✅ 快照已记录: {snap.date} | 权益: ¥{snap.equity:,.0f}[/green]")
+
+    else:
+        console.print("[red]用法: paper summary|buy|sell|reset|snapshot[/red]")
+
+
+# ── 组合回测 ──────────────────────────────────────────────
+
+@app.command()
+def pf_backtest(
+    symbols: str = typer.Option("000001,000002,000858", "--symbols", help="逗号分隔股票代码"),
+    allocation: str = typer.Option("equal_weight", "--alloc", help="分配策略: equal_weight / score_weighted / risk_parity / kelly"),
+    rebalance: str = typer.Option("weekly", "--rebalance", help="再平衡周期: daily / weekly / monthly"),
+    initial_capital: float = typer.Option(100000, "--capital", "-c", help="初始资金"),
+    strategy: str = typer.Option("trend", "--strategy", "-s", help="交易策略"),
+):
+    """多资产组合回测。"""
+    from backtest.portfolio import PortfolioBacktest, format_portfolio_result
+
+    sym_list = [s.strip() for s in symbols.split(",")]
+    a = get_agent(strategy)
+
+    console.print(f"[dim]正在加载 {len(sym_list)} 只股票数据...[/dim]")
+
+    signals_by_sym = {}
+    price_data = {}
+    scores = {}
+
+    with console.status("[bold green]组合回测中...[/bold green]"):
+        for sym in sym_list:
+            try:
+                kline = a.market_data.get_daily_kline(sym)
+                if kline.empty:
+                    console.print(f"[yellow]⚠️ {sym} 无K线数据[/yellow]")
+                    continue
+                price_data[sym] = kline
+
+                # 生成回测信号
+                st = StrategyFactory.get(strategy)
+                signals_df = st.generate_bt_signals(kline)
+                if not signals_df.empty:
+                    signals_by_sym[sym] = signals_df
+
+                # 评分
+                score = a.analyze(sym)
+                scores[sym] = score.total_score
+            except Exception as e:
+                console.print(f"[yellow]⚠️ {sym} 失败: {e}[/yellow]")
+
+    if not signals_by_sym:
+        console.print("[red]无有效数据[/red]")
+        return
+
+    engine = PortfolioBacktest(initial_capital=initial_capital)
+    result = engine.run(
+        signals_by_sym, price_data,
+        allocation=allocation,
+        rebalance=rebalance,
+        scores=scores,
+    )
+
+    console.print(format_portfolio_result(result))
+
+    # 权益曲线
+    if not result.equity_curve.empty:
+        console.print("\n[bold]权益曲线（最近20日）[/bold]")
+        for _, row in result.equity_curve.tail(20).iterrows():
+            console.print(
+                f"  {row['date']} | "
+                f"权益: ¥{row['equity']:,.0f} | "
+                f"回撤: {row['drawdown']*100:.1f}% | "
+                f"持仓: {int(row['positions'])}"
+            )
+
+
+# ── Web 面板 ──────────────────────────────────────────────
+
+@app.command()
+def web(
+    port: int = typer.Option(8501, "--port", "-p", help="监听端口"),
+    host: str = typer.Option("0.0.0.0", "--host", help="监听地址"),
+):
+    """启动 Web 可视化面板（Streamlit）。"""
+    import subprocess
+
+    web_app = os.path.join(os.path.dirname(__file__), "web", "app.py")
+
+    console.print(f"[bold green]🚀 启动 Web 面板...[/bold green]")
+    console.print(f"[dim]地址: http://{host}:{port}[/dim]")
+    console.print("[dim]按 Ctrl+C 停止[/dim]")
+
+    subprocess.run([
+        sys.executable, "-m", "streamlit", "run",
+        web_app,
+        "--server.port", str(port),
+        "--server.address", host,
+        "--server.headless", "true",
+    ])
+
+
 # ── main ───────────────────────────────────────────────────
 
 def main():
