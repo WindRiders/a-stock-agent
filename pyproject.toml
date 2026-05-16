@@ -51,6 +51,8 @@ a-stock-agent = "cli:main"
 [tool.setuptools]
 packages = ["agent", "data", "analysis", "strategy", "backtest", "risk"]
 py-modules = ["cli", "factor_engine", "ml_model", "broker", "paper_trading", "watchlist", "api_server"]
+[tool.setuptools.package-data]
+agent = ["*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

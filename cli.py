@@ -1703,6 +1703,119 @@ def broker(
     b.disconnect()
 
 
+# ── 自主交易 ───────────────────────────────────────────────
+
+@app.command()
+def trade(
+    action: str = typer.Argument("run", help="run|monitor|status|dashboard|plan"),
+    mode: str = typer.Option("paper", "--mode", "-m", help="paper=模拟盘 live=实盘"),
+    capital: float = typer.Option(100000, "--capital", "-c", help="初始资金（模拟盘）"),
+    top_n: int = typer.Option(50, "--top", "-n", help="扫描股票数"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="仅分析，不执行交易"),
+    strategy: str = typer.Option(None, "--strategy", "-s", help="强制指定策略"),
+):
+    """自主交易引擎 — 扫描→信号→执行→监控→通知 全闭环。
+
+    用法:
+      python cli.py trade run           # 单次自主交易（扫描→执行→报告）
+      python cli.py trade run --dry-run # 盘前预演（分析但不交易）
+      python cli.py trade monitor       # 持续监控（交易时段自动运行）
+      python cli.py trade status        # 查看当前状态
+      python cli.py trade dashboard     # 交易仪表盘
+      python cli.py trade plan          # 生成交易计划（不执行）
+    """
+    from agent.trader import AutoTrader
+
+    if action == "run":
+        trader = AutoTrader(mode=mode, capital=capital, strategy=strategy)
+        session = trader.run_once(top_n=top_n, dry_run=dry_run)
+        console.print(f"\n[bold green]✅ 交易会话完成[/bold green]")
+        console.print(f"   执行: {session.orders_executed}笔 | 拒绝: {session.orders_rejected}笔")
+        console.print(f"   报告: ~/.a-stock-agent/reports/trade_{session.date}.md")
+
+    elif action == "monitor":
+        console.print("[bold yellow]🔄 启动持续监控模式...[/bold yellow]")
+        console.print("   按 Ctrl+C 停止")
+        trader = AutoTrader(mode=mode, capital=capital, strategy=strategy)
+        trader.run_monitor(interval=60)
+
+    elif action == "status":
+        trader = AutoTrader(mode=mode, capital=capital, strategy=strategy)
+        old_state = trader.load_state()
+        status = trader.status()
+        console.print(f"[bold]自主交易状态[/bold]")
+        console.print(f"  模式: {status['mode']}")
+        console.print(f"  策略: {status['strategy']}")
+        console.print(f"  市场: {status.get('market_state', '-')}")
+        console.print(f"  总资产: ¥{status['equity']:,.0f}")
+        console.print(f"  现金: ¥{status['cash']:,.0f}")
+        console.print(f"  收益: {status['total_return_pct']:+.2f}%")
+        console.print(f"  持仓: {status['positions']}只")
+        console.print(f"  胜率: {status['win_rate']:.1f}% | 夏普: {status['sharpe']:.2f}")
+        if old_state:
+            console.print(f"  上次运行: {old_state.get('updated_at', '-')}")
+
+    elif action == "dashboard":
+        from rich.table import Table
+        from rich.panel import Panel
+
+        trader = AutoTrader(mode=mode, capital=capital, strategy=strategy)
+        status = trader.status()
+        summary = trader.paper_trader.summary()
+
+        # 权益曲线
+        if summary.equity_curve:
+            curve_text = ""
+            for pt in summary.equity_curve[-20:]:
+                bar_len = int(pt['equity'] / trader.initial_capital * 30)
+                curve_text += f"  {pt['date']} {'█' * min(bar_len, 30)}\n"
+
+        panel = Panel.fit(
+            f"[bold]A股自主交易仪表盘[/bold]\n"
+            f"\n"
+            f"📊 账户: ¥{status['equity']:,.0f} | "
+            f"收益: [{'green' if status['total_return_pct'] >= 0 else 'red'}]"
+            f"{status['total_return_pct']:+.2f}%[/]\n"
+            f"💰 现金: ¥{status['cash']:,.0f} | "
+            f"持仓: {status['positions']}只\n"
+            f"📈 策略: {status['strategy']} | 胜率: {status['win_rate']:.1f}%\n"
+            f"📉 夏普: {status['sharpe']:.2f} | 回撤: {status['max_drawdown']:.2f}%\n"
+            f"📋 交易: {status['total_trades']}笔",
+            title="🚀 交易引擎",
+            border_style="green",
+        )
+        console.print(panel)
+
+        if trader.paper_trader.positions:
+            table = Table(title="当前持仓")
+            table.add_column("代码")
+            table.add_column("名称")
+            table.add_column("股数")
+            table.add_column("成本")
+            table.add_column("现价")
+            table.add_column("盈亏%")
+            for sym, pos in trader.paper_trader.positions.items():
+                pnl = pos.unrealized_pnl_pct * 100
+                color = "green" if pnl >= 0 else "red"
+                table.add_row(
+                    sym, pos.name, str(pos.shares),
+                    f"¥{pos.avg_cost:.2f}", f"¥{pos.current_price:.2f}",
+                    f"[{color}]{pnl:+.1f}%[/{color}]",
+                )
+            console.print(table)
+
+    elif action == "plan":
+        trader = AutoTrader(mode=mode, capital=capital, strategy=strategy)
+        session = trader.run_once(top_n=top_n, dry_run=True)
+        console.print("\n[bold cyan]📋 交易计划已生成（未执行）[/bold cyan]")
+        console.print(f"  买入信号: {session.signals_generated}条")
+        console.print(f"  市场状态: {session.market_state}")
+        console.print(f"  推荐策略: {session.recommended_strategy}")
+
+    else:
+        console.print("[red]用法: trade run|monitor|status|dashboard|plan[/red]")
+
+
 # ── main ───────────────────────────────────────────────────
 
 def main():
