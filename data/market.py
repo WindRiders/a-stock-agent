@@ -48,6 +48,7 @@ class MarketData:
         self._bs_login()
         rs = bs.query_stock_basic(code_name="")
         bs.logout()
+        self._bs_logged_in = False
         records = []
         while (rs.error_code == "0") & rs.next():
             row = rs.get_row_data()
@@ -168,18 +169,7 @@ class MarketData:
             frequency=freq_map.get(period, "d"),
             adjustflag=adjust_map.get(adjust, "2"),
         )
-        if rs is None:
-            self._bs_logged_in = False
-            bs.login()
-            rs = bs.query_history_k_data_plus(
-                code,
-                "date,open,high,low,close,volume,amount,turn,pctChg",
-                start_date=start_fmt,
-                end_date=end_fmt,
-                frequency=freq_map.get(period, "d"),
-                adjustflag=adjust_map.get(adjust, "2"),
-            )
-        bs.logout()
+        # 保持 session 存活，批量查询时不 logout
         if rs is None or rs.error_code != "0":
             raise RuntimeError(f"baostock 查询失败: {rs.error_msg if rs else '无响应'}")
         records = []
@@ -283,6 +273,12 @@ class MarketData:
             if lg.error_code != "0":
                 logger.warning("baostock 登录失败: %s", lg.error_msg)
             self._bs_logged_in = True
+
+    def _bs_logout(self):
+        """安全退出 baostock 会话（批量操作结束时调用）。"""
+        if self._bs_logged_in:
+            bs.logout()
+            self._bs_logged_in = False
 
     def normalize_symbol(self, symbol: str) -> str:
         """标准化股票代码为6位数字。"""

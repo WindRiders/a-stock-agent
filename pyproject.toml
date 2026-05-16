@@ -33,20 +33,24 @@ dependencies = [
     "matplotlib>=3.7.0",
     "rich>=13.0.0",
     "typer>=0.9.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "requests>=2.28",
+    "scipy>=1.10",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
 ]
 
 [project.scripts]
 a-stock-agent = "cli:main"
 
 [tool.setuptools]
-packages = ["agent", "data", "analysis", "strategy", "backtest"]
-py-modules = ["cli"]
+packages = ["agent", "data", "analysis", "strategy", "backtest", "risk"]
+py-modules = ["cli", "factor_engine", "ml_model", "broker", "paper_trading", "watchlist", "api_server"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
