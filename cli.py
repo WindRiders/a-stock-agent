@@ -1816,6 +1816,43 @@ def trade(
         console.print("[red]用法: trade run|monitor|status|dashboard|plan[/red]")
 
 
+# ── 仪表盘服务 ─────────────────────────────────────────────
+
+@app.command()
+def dashboard_serve(
+    port: int = typer.Option(8888, "--port", "-p", help="服务端口"),
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="绑定地址"),
+):
+    """启动 Web 交易仪表盘。
+
+    浏览器打开 http://localhost:8888 查看：
+    - 账户总览（资产/收益/回撤/夏普）
+    - 当前持仓（成本/现价/盈亏）
+    - 交易决策（信号/评分/理由）
+    - 历史报告（30天记录）
+    - 运行日志
+
+    零外部依赖，Python 标准库即可启动。
+    """
+    import subprocess
+
+    server_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "server.py")
+    if not os.path.exists(server_script):
+        console.print("[red]错误: web/server.py 不存在[/red]")
+        return
+
+    console.print(f"[bold green]📊 仪表盘启动中...[/bold green]")
+    console.print(f"   浏览器打开: [bold cyan]http://{host if host != '0.0.0.0' else 'localhost'}:{port}[/bold cyan]")
+    console.print(f"   API:        http://localhost:{port}/api/state")
+    console.print(f"   API:        http://localhost:{port}/api/reports")
+    console.print(f"   按 Ctrl+C 停止\n")
+
+    subprocess.run(
+        [sys.executable, server_script, "--port", str(port), "--host", host],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+
+
 # ── main ───────────────────────────────────────────────────
 
 def main():

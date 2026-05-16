@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A股交易仪表盘</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+  .header { background: linear-gradient(135deg, #161b22 0%, #1a2332 100%); border-bottom: 1px solid #30363d; padding: 20px 32px; display: flex; justify-content: space-between; align-items: center; }
+  .header h1 { font-size: 1.5rem; color: #58a6ff; }
+  .header .status { display: flex; gap: 12px; }
+  .header .badge { padding: 4px 12px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; }
+  .badge-green { background: #238636; color: #fff; }
+  .badge-yellow { background: #9e6a03; color: #fff; }
+  .badge-red { background: #da3633; color: #fff; }
+  .tab-bar { display: flex; gap: 0; background: #161b22; border-bottom: 1px solid #30363d; padding: 0 32px; }
+  .tab { padding: 12px 24px; cursor: pointer; border-bottom: 2px solid transparent; color: #8b949e; font-size: 0.9rem; transition: all 0.15s; }
+  .tab:hover { color: #c9d1d9; }
+  .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+  .content { padding: 24px 32px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+  .card .label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; }
+  .card .value { font-size: 1.4rem; font-weight: 700; }
+  .card .sub { font-size: 0.8rem; color: #8b949e; margin-top: 2px; }
+  .value-green { color: #3fb950; }
+  .value-red { color: #f85149; }
+  .value-blue { color: #58a6ff; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th { text-align: left; padding: 10px 12px; background: #161b22; border-bottom: 1px solid #30363d; font-size: 0.8rem; color: #8b949e; font-weight: 600; position: sticky; top: 0; }
+  td { padding: 10px 12px; border-bottom: 1px solid #21262d; font-size: 0.85rem; }
+  tr:hover { background: #1c2128; }
+  .signal-buy { color: #3fb950; font-weight: 700; }
+  .signal-sell { color: #f85149; font-weight: 700; }
+  .section-title { font-size: 1.1rem; font-weight: 600; color: #58a6ff; margin: 20px 0 12px; }
+  .empty-state { text-align: center; padding: 60px 20px; color: #484f58; }
+  .empty-state .icon { font-size: 3rem; margin-bottom: 12px; }
+  .refresh { cursor: pointer; color: #58a6ff; font-size: 0.9rem; margin-left: 12px; }
+  .log-line { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; padding: 4px 12px; border-bottom: 1px solid #21262d; color: #8b949e; }
+  .log-line:hover { background: #1c2128; }
+  .loading { display: flex; align-items: center; justify-content: center; padding: 40px; }
+  .spinner { width: 32px; height: 32px; border: 3px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📈 A股自主交易仪表盘</h1>
+  <div class="status">
+    <span class="badge badge-green" id="market-badge">--</span>
+    <span class="badge badge-yellow" id="mode-badge">paper</span>
+  </div>
+</div>
+
+<div class="tab-bar">
+  <div class="tab active" onclick="switchTab('overview')">📊 总览</div>
+  <div class="tab" onclick="switchTab('positions')">💼 持仓</div>
+  <div class="tab" onclick="switchTab('decisions')">📡 决策</div>
+  <div class="tab" onclick="switchTab('history')">📜 历史</div>
+  <div class="tab" onclick="switchTab('log')">📋 日志</div>
+  <div style="flex:1"></div>
+  <span style="align-self:center;color:#8b949e;font-size:0.8rem;cursor:pointer" onclick="loadAll()">🔄 刷新</span>
+</div>
+
+<div class="content">
+  <!-- OVERVIEW -->
+  <div id="tab-overview">
+    <div class="cards" id="overview-cards"></div>
+    <div class="section-title">📈 权益曲线</div>
+    <div id="equity-chart" style="height:200px; background:#161b22; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#484f58;">暂无数据</div>
+  </div>
+
+  <!-- POSITIONS -->
+  <div id="tab-positions" style="display:none">
+    <div class="cards" id="position-cards"></div>
+    <div id="positions-table"></div>
+  </div>
+
+  <!-- DECISIONS -->
+  <div id="tab-decisions" style="display:none">
+    <div id="decisions-table"></div>
+  </div>
+
+  <!-- HISTORY -->
+  <div id="tab-history" style="display:none">
+    <div id="history-table"></div>
+  </div>
+
+  <!-- LOG -->
+  <div id="tab-log" style="display:none">
+    <div id="log-content" style="background:#0d1117; border:1px solid #30363d; border-radius:8px; max-height:600px; overflow-y:auto; font-family:monospace; font-size:0.8rem;"></div>
+  </div>
+</div>
+
+<script>
+const API = '/api';
+
+async function loadAll() {
+  try {
+    const [state, reports] = await Promise.all([
+      fetch(API + '/state').then(r => r.json()),
+      fetch(API + '/reports').then(r => r.json()),
+    ]);
+    renderOverview(state);
+    renderPositions(state);
+    renderDecisions(state);
+    renderHistory(reports);
+    renderLog(reports);
+    document.getElementById('market-badge').textContent = state.market_state || '--';
+    document.getElementById('mode-badge').textContent = state.mode || 'paper';
+  } catch(e) {
+    console.error(e);
+    document.getElementById('overview-cards').innerHTML = '<div class="empty-state"><div class="icon">⚠</div>加载失败 - 确认仪表盘服务已启动<br><code>python cli.py dashboard-serve</code></div>';
+  }
+}
+
+function renderOverview(state) {
+  const r = state;
+  const pnlColor = (r.total_return_pct||0) >= 0 ? 'value-green' : 'value-red';
+  document.getElementById('overview-cards').innerHTML = `
+    <div class="card"><div class="label">总资产</div><div class="value value-blue">¥${(r.equity||0).toLocaleString()}</div></div>
+    <div class="card"><div class="label">现金</div><div class="value">¥${(r.cash||0).toLocaleString()}</div></div>
+    <div class="card"><div class="label">累计收益</div><div class="value ${pnlColor}">${(r.total_return_pct||0).toFixed(2)}%</div></div>
+    <div class="card"><div class="label">持仓</div><div class="value">${r.positions||0} 只</div><div class="sub">市值 ¥${(r.positions_value||0).toLocaleString()}</div></div>
+    <div class="card"><div class="label">胜率</div><div class="value">${(r.win_rate||0).toFixed(1)}%</div><div class="sub">夏普 ${(r.sharpe||0).toFixed(2)}</div></div>
+    <div class="card"><div class="label">最大回撤</div><div class="value value-red">${(r.max_drawdown||0).toFixed(2)}%</div></div>
+    <div class="card"><div class="label">累计交易</div><div class="value">${r.total_trades||0} 笔</div></div>
+    <div class="card"><div class="label">策略</div><div class="value" style="font-size:1rem">${r.strategy||'--'}</div><div class="sub">${r.market_state||'--'}</div></div>
+  `;
+}
+
+function renderPositions(state) {
+  const pos = state.active_positions || [];
+  document.getElementById('position-cards').innerHTML = `
+    <div class="card"><div class="label">持仓数</div><div class="value">${pos.length}</div></div>
+    <div class="card"><div class="label">持仓市值</div><div class="value value-blue">¥${(state.positions_value||0).toLocaleString()}</div></div>
+  `;
+  if (!pos.length) {
+    document.getElementById('positions-table').innerHTML = '<div class="empty-state"><div class="icon">📭</div>暂无持仓</div>';
+    return;
+  }
+  let html = '<table><tr><th>代码</th><th>名称</th><th>股数</th><th>成本</th><th>现价</th><th>市值</th><th>盈亏%</th></tr>';
+  pos.forEach(p => {
+    const pnl = p.unrealized_pnl_pct != null ? (p.unrealized_pnl_pct * 100) : 0;
+    const c = pnl >= 0 ? 'value-green' : 'value-red';
+    html += `<tr>
+      <td>${p.symbol}</td><td>${p.name||''}</td><td>${p.shares}</td>
+      <td>¥${(p.avg_cost||0).toFixed(2)}</td><td>¥${(p.current_price||0).toFixed(2)}</td>
+      <td>¥${(p.market_value||0).toLocaleString()}</td>
+      <td class="${c}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%</td>
+    </tr>`;
+  });
+  document.getElementById('positions-table').innerHTML = html + '</table>';
+}
+
+function renderDecisions(state) {
+  const decs = state.last_decisions || [];
+  if (!decs.length) {
+    document.getElementById('decisions-table').innerHTML = '<div class="empty-state"><div class="icon">📡</div>暂无交易决策</div>';
+    return;
+  }
+  let html = `<div class="section-title">最近决策 (${state.last_date||''})</div><table><tr><th>代码</th><th>名称</th><th>信号</th><th>评分</th><th>动作</th><th>金额</th><th>理由</th></tr>`;
+  decs.forEach(d => {
+    const sig = d.signal && d.signal.includes('BUY') ? 'signal-buy' : (d.signal && d.signal.includes('SELL') ? 'signal-sell' : '');
+    html += `<tr>
+      <td>${d.symbol}</td><td>${d.name||''}</td><td class="${sig}">${d.signal||''}</td>
+      <td>${(d.score||0).toFixed(2)}</td><td>${d.action||''}</td>
+      <td>¥${(d.amount||0).toLocaleString()}</td><td>${d.reason||''}</td>
+    </tr>`;
+  });
+  document.getElementById('decisions-table').innerHTML = html + '</table>';
+}
+
+function renderHistory(reports) {
+  const items = reports.reports || [];
+  if (!items.length) {
+    document.getElementById('history-table').innerHTML = '<div class="empty-state"><div class="icon">📜</div>暂无历史报告</div>';
+    return;
+  }
+  let html = '<table><tr><th>日期</th><th>总资产</th><th>收益</th><th>交易</th><th>胜率</th><th>持仓</th><th>报告</th></tr>';
+  items.slice(0, 30).forEach(r => {
+    const pnl = (r.total_return_pct||0) >= 0 ? 'value-green' : 'value-red';
+    html += `<tr>
+      <td>${r.date}</td>
+      <td>¥${(r.equity||0).toLocaleString()}</td>
+      <td class="${pnl}">${(r.total_return_pct||0).toFixed(2)}%</td>
+      <td>${r.total_trades||0}笔</td>
+      <td>${(r.win_rate||0).toFixed(1)}%</td>
+      <td>${r.positions||0}只</td>
+      <td><a href="/reports/trade_${r.date}.md" style="color:#58a6ff" target="_blank">查看</a></td>
+    </tr>`;
+  });
+  document.getElementById('history-table').innerHTML = html + '</table>';
+}
+
+function renderLog(reports) {
+  const log = reports.log || [];
+  if (!log.length) {
+    document.getElementById('log-content').innerHTML = '<div style="padding:20px;color:#484f58">暂无日志</div>';
+    return;
+  }
+  document.getElementById('log-content').innerHTML = log.map(l => `<div class="log-line">${escapeHtml(l)}</div>`).join('');
+}
+
+function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('[id^="tab-"]').forEach(d => d.style.display = 'none');
+  document.getElementById('tab-' + name).style.display = 'block';
+  event.target.classList.add('active');
+}
+
+loadAll();
+setInterval(loadAll, 60000);
+</script>
+</body>
+</html>
